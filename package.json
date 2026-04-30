@@ -1,0 +1,40 @@
+{
+  "name": "bnb-distribution-backend",
+  "version": "1.0.0",
+  "description": "Express.js API + BNB Chain distribution scripts (merged)",
+  "main": "dist/src/index.js",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/src/index.js",
+    "compile": "npx hardhat compile",
+    "deploy:token": "npx hardhat run scripts/deploy-token.ts --network bscTestnet",
+    "deploy:multisender": "npx hardhat run scripts/deploy-multisender.ts --network bscTestnet",
+    "deploy:multisender:mainnet": "npx hardhat run scripts/deploy-multisender.ts --network bscMainnet",
+    "generate:wallets": "npx ts-node scripts/generate-wallets.ts",
+    "prepare:distribution": "npx ts-node scripts/prepare-distribution.ts",
+    "distribute": "npx ts-node scripts/distribute.ts",
+    "export": "npx ts-node scripts/export-results.ts"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "ethers": "^6.11.1",
+    "exceljs": "^4.4.0",
+    "express": "^4.18.3",
+    "mongoose": "^8.3.4",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.0",
+    "@types/uuid": "^9.0.8",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.2",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.3"
+  }
+}
