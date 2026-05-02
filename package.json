@@ -2,11 +2,11 @@
   "name": "bnb-distribution-backend",
   "version": "1.0.0",
   "description": "Express.js API + BNB Chain distribution scripts (merged)",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "compile": "npx hardhat compile",
     "deploy:token": "npx hardhat run scripts/deploy-token.ts --network bscTestnet",
     "deploy:multisender": "npx hardhat run scripts/deploy-multisender.ts --network bscTestnet",
