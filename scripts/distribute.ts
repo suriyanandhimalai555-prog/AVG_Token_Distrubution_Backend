@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
 import { ethers, JsonRpcProvider, Wallet, Contract, TransactionResponse, TransactionReceipt } from "ethers";
+import { chunkUnsentBatches, countBatchesForWalletCount } from "../src/lib/distributionBatching";
 
 dotenv.config();
 
@@ -392,7 +393,7 @@ async function main(): Promise<void> {
   await ensureFunded(tokenAddress, multisenderAddress, deployer, plan.filter((e) => !e.sent));
 
   const startTime = Date.now();
-  const totalBatches = Math.ceil(plan.length / BATCH_SIZE);
+  const totalBatches = countBatchesForWalletCount(totalStart, BATCH_SIZE);
 
   // ── Drain loop: repeat until all wallets sent or no progress made ──────────
   for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
@@ -403,13 +404,14 @@ async function main(): Promise<void> {
     log(`Pass ${pass}/${MAX_DRAIN_PASSES} — ${unsent.length.toLocaleString()} wallets remaining`);
     log(`${"─".repeat(60)}`);
 
-    const batches        = chunkArray(unsent, BATCH_SIZE);
+    const batches        = chunkUnsentBatches(unsent, BATCH_SIZE);
     const parallelGroups = chunkArray(batches, PARALLEL_BATCHES);
 
     // Fresh submitter each pass = fresh nonce chain
     const submitter = new SerialTxSubmitter(deployer, rpcManager);
 
-    let globalBatchNum = Math.floor((plan.length - unsent.length) / BATCH_SIZE);
+    const sentWalletCount = plan.length - unsent.length;
+    let batchOrdinal = countBatchesForWalletCount(sentWalletCount, BATCH_SIZE);
     let passSuccess    = 0;
     let passFail       = 0;
 
@@ -418,9 +420,9 @@ async function main(): Promise<void> {
 
       // Fire all batches in the group; SerialTxSubmitter serialises sign+broadcast
       const batchPromises = group.map((batch) => {
-        globalBatchNum++;
+        batchOrdinal++;
         return sendBatchWithRetry(
-          batch, globalBatchNum, totalBatches,
+          batch, batchOrdinal, totalBatches,
           multisender, tokenAddress, multisenderAddress,
           deployer, rpcManager, submitter, chainId
         );

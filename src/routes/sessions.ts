@@ -16,8 +16,11 @@ router.post("/", async (req: Request, res: Response) => {
       multisenderAddress: string;
     };
 
-    if (!totalWallets || totalWallets < 1) {
+    if (!Number.isFinite(totalWallets) || totalWallets < 1) {
       return res.status(400).json({ error: "totalWallets must be ≥ 1" });
+    }
+    if (totalWallets > 100_000) {
+      return res.status(400).json({ error: "totalWallets must be ≤ 100,000" });
     }
     if (!network || !["bscMainnet", "bscTestnet"].includes(network)) {
       return res.status(400).json({ error: "network must be bscMainnet or bscTestnet" });

@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ethers } from "ethers";
+import { countBatchesForWalletCount } from "../src/lib/distributionBatching";
 
 const OUTPUT_DIR = path.resolve(__dirname, "../output");
 const WALLETS_CSV = path.join(OUTPUT_DIR, "wallets.csv");
@@ -91,8 +92,11 @@ async function prepareDistribution(): Promise<void> {
   console.log(`Expected minimum:       ${minPossible.toLocaleString()} (${AMOUNT_MIN} × ${wallets.length.toLocaleString()})`);
   console.log(`Expected maximum:       ${maxPossible.toLocaleString()} (${AMOUNT_MAX} × ${wallets.length.toLocaleString()})`);
   console.log(`Total wei:              ${(totalTokens * BigInt(10 ** 18)).toString()}`);
-  const BATCH_SIZE = 350;
-  console.log(`Batches needed:         ${Math.ceil(wallets.length / BATCH_SIZE).toLocaleString()} (${BATCH_SIZE} wallets/batch)`);
+  const multiBatchSize = Math.max(20, Math.min(500, Number(process.env.BATCH_SIZE ?? 50)));
+  const estOnChainBatches = countBatchesForWalletCount(wallets.length, multiBatchSize);
+  console.log(
+    `On-chain batches (est.): ${estOnChainBatches.toLocaleString()} — tail ≤50 wallets = one tx; else up to ${multiBatchSize}/tx`
+  );
   console.log("─────────────────────────────────────────────────\n");
 
   console.log(`Writing ${PLAN_FILE}...`);

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { Session } from "../models/Session";
+import { countBatchesForWalletCount } from "../lib/distributionBatching";
 
 const router = Router();
 
@@ -10,7 +11,9 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
 ];
 
-const BATCH_SIZE = 50;
+function resolveMultiBatchSize(): number {
+  return Math.max(20, Math.min(500, Number(process.env.BATCH_SIZE ?? 50)));
+}
 const GAS_LIMIT_PER_BATCH = 4_000_000n;
 const LIKELY_GAS_PER_BATCH = 3_250_000n;
 const GAS_PRICE_GWEI = "3";
@@ -129,7 +132,8 @@ router.post("/preflight", async (req: Request, res: Response) => {
     const requiredMinTokens = totalWallets * 100;
     const requiredAvgTokens = totalWallets * 200;
     const requiredMaxTokens = totalWallets * 300;
-    const batchCount = Math.ceil(totalWallets / BATCH_SIZE);
+    const multiBatchSize = resolveMultiBatchSize();
+    const batchCount = countBatchesForWalletCount(totalWallets, multiBatchSize);
 
     const gasPriceWei = ethers.parseUnits(GAS_PRICE_GWEI, "gwei");
     const estimatedGasLikely = LIKELY_GAS_PER_BATCH * BigInt(batchCount);
@@ -148,7 +152,7 @@ router.post("/preflight", async (req: Request, res: Response) => {
       network: targetNetwork,
       nativeSymbol: targetNetwork === "bscTestnet" ? "tBNB" : "BNB",
       totalWallets,
-      batchSize: BATCH_SIZE,
+      batchSize: multiBatchSize,
       batchCount,
       token: {
         address: session.tokenAddress,
