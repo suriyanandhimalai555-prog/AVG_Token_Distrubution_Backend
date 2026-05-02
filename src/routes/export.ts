@@ -44,6 +44,55 @@ async function resolveTokenName(tokenAddress: string): Promise<string> {
   return tokenName;
 }
 
+function rpcUrlForSession(network: string): string {
+  if (network === "bscTestnet") {
+    return (
+      process.env.BSC_TESTNET_RPC_URL ||
+      process.env.ALCHEMY_RPC_URL ||
+      process.env.FALLBACK_RPC_1 ||
+      ""
+    );
+  }
+  return (
+    process.env.ALCHEMY_RPC_URL ||
+    process.env.FALLBACK_RPC_1 ||
+    process.env.FALLBACK_RPC_2 ||
+    ""
+  );
+}
+
+function networkDisplayName(network: string): string {
+  if (network === "bscTestnet") return "BSC Testnet";
+  if (network === "bscMainnet") return "BSC Mainnet";
+  return network;
+}
+
+/** Current native coin balance per address (best-effort at export time). */
+async function nativeBalanceByAddress(addresses: string[], rpcUrl: string): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!rpcUrl) {
+    for (const a of addresses) out.set(a, "N/A (no RPC)");
+    return out;
+  }
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const chunk = 35;
+  for (let i = 0; i < addresses.length; i += chunk) {
+    const slice = addresses.slice(i, i + chunk);
+    const results = await Promise.all(
+      slice.map((addr) =>
+        provider.getBalance(addr).then(
+          (b) => ethers.formatEther(b),
+          () => "N/A"
+        )
+      )
+    );
+    for (let j = 0; j < slice.length; j++) {
+      out.set(slice[j], results[j]);
+    }
+  }
+  return out;
+}
+
 // GET /api/export?sessionId=xxx&file=csv|xlsx|wallets|json
 router.get("/", async (req: Request, res: Response) => {
   try {
@@ -84,7 +133,14 @@ router.get("/", async (req: Request, res: Response) => {
     const wallets = await Wallet.find({ sessionId })
       .sort({ index: 1 })
       .lean();
-    const tokenName = await resolveTokenName(session.tokenAddress);
+    const tokenNameResolved =
+      (session.tokenName && session.tokenName.trim()) ||
+      (await resolveTokenName(session.tokenAddress));
+    const rpcUrl = rpcUrlForSession(session.network);
+    const nativeByAddr = await nativeBalanceByAddress(
+      wallets.map((w) => w.address),
+      rpcUrl
+    );
 
     // Use distribution-plan.json as authoritative source of per-wallet tx hashes.
     // This avoids mismatch when DB sync lags or session is partially updated.
@@ -103,25 +159,28 @@ router.get("/", async (req: Request, res: Response) => {
       }
     }
 
+    const mnemonic = session.masterMnemonic ?? "";
+    const networkLabel = networkDisplayName(session.network);
+
     if (file === "csv") {
       res.setHeader("Content-Disposition", "attachment; filename=distribution-log.csv");
       res.setHeader("Content-Type", "text/csv");
 
       const lines = [
-        "Wallet Address,Seed Phrase (Mnemonic),Network,Native Balance,Token Name,Token Contract Address,Token Balance,Transaction Hash",
+        "Wallet Address,Seed Phrase (Mnemonic),Network,Native Balance,Token Name,Transaction Hash,Token Balance",
       ];
       for (const w of wallets) {
         const txHash = txHashByIndex.get(w.index) ?? (w.txHash ?? "");
+        const distributedTokens = String(w.amount ?? 0);
         lines.push(
           [
             csvEscape(w.address),
-            "", // intentionally blank for now; will be filled from backend later
-            "BNB",
-            "0.0",
-            csvEscape(tokenName),
-            csvEscape(session.tokenAddress),
-            String(w.amount ?? 0),
+            csvEscape(mnemonic),
+            csvEscape(networkLabel),
+            csvEscape(nativeByAddr.get(w.address) ?? "0.0"),
+            csvEscape(tokenNameResolved),
             csvEscape(String(txHash)),
+            csvEscape(distributedTokens),
           ].join(",")
         );
       }
@@ -134,26 +193,24 @@ router.get("/", async (req: Request, res: Response) => {
 
       sheet.columns = [
         { header: "Wallet Address", key: "walletAddress", width: 44 },
-        { header: "Seed Phrase (Mnemonic)", key: "mnemonic", width: 42 },
-        { header: "Network", key: "network", width: 10 },
-        { header: "Native Balance", key: "nativeBalance", width: 16 },
-        { header: "Token Name", key: "tokenName", width: 18 },
-        { header: "Token Contract Address", key: "tokenContractAddress", width: 44 },
-        { header: "Token Balance", key: "tokenBalance", width: 16 },
+        { header: "Seed Phrase (Mnemonic)", key: "mnemonic", width: 56 },
+        { header: "Network", key: "network", width: 16 },
+        { header: "Native Balance", key: "nativeBalance", width: 18 },
+        { header: "Token Name", key: "tokenName", width: 20 },
         { header: "Transaction Hash", key: "transactionHash", width: 68 },
+        { header: "Token Balance", key: "tokenBalance", width: 16 },
       ];
 
       for (const w of wallets) {
         const txHash = txHashByIndex.get(w.index) ?? (w.txHash ?? "");
         sheet.addRow({
           walletAddress: w.address,
-          mnemonic: "", // intentionally blank for now; will be filled from backend later
-          network: "BNB",
-          nativeBalance: "0.0",
-          tokenName,
-          tokenContractAddress: session.tokenAddress,
-          tokenBalance: String(w.amount ?? 0),
+          mnemonic,
+          network: networkLabel,
+          nativeBalance: nativeByAddr.get(w.address) ?? "0.0",
+          tokenName: tokenNameResolved,
           transactionHash: txHash,
+          tokenBalance: String(w.amount ?? 0),
         });
       }
 

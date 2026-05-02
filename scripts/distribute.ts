@@ -2,7 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as dotenv from "dotenv";
 import { ethers, JsonRpcProvider, Wallet, Contract, TransactionResponse, TransactionReceipt } from "ethers";
-import { chunkUnsentBatches, countBatchesForWalletCount } from "../src/lib/distributionBatching";
+import { chunkFixedBatches, countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../src/lib/distributionBatching";
 
 dotenv.config();
 
@@ -16,7 +16,7 @@ const ARTIFACTS_DIR = path.resolve(__dirname, "../artifacts/contracts");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const BATCH_SIZE       = Math.max(20, Math.min(500, Number(process.env.BATCH_SIZE ?? 50)));
+const BATCH_SIZE       = resolveMultiBatchSizeFromEnv();
 const PARALLEL_BATCHES = Math.max(1, Math.min(10, Number(process.env.PARALLEL_BATCHES ?? 1)));
 const MAX_RETRIES      = 3;
 const RETRY_DELAYS_MS  = [5_000, 10_000, 15_000];
@@ -404,7 +404,7 @@ async function main(): Promise<void> {
     log(`Pass ${pass}/${MAX_DRAIN_PASSES} — ${unsent.length.toLocaleString()} wallets remaining`);
     log(`${"─".repeat(60)}`);
 
-    const batches        = chunkUnsentBatches(unsent, BATCH_SIZE);
+    const batches        = chunkFixedBatches(unsent, BATCH_SIZE);
     const parallelGroups = chunkArray(batches, PARALLEL_BATCHES);
 
     // Fresh submitter each pass = fresh nonce chain

@@ -1,14 +1,14 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ethers } from "ethers";
-import { countBatchesForWalletCount } from "../src/lib/distributionBatching";
+import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../src/lib/distributionBatching";
 
 const OUTPUT_DIR = path.resolve(__dirname, "../output");
 const WALLETS_CSV = path.join(OUTPUT_DIR, "wallets.csv");
 const PLAN_FILE = path.join(OUTPUT_DIR, "distribution-plan.json");
 
-const AMOUNT_MIN = 100;
-const AMOUNT_MAX = 300;
+const AMOUNT_MIN = 1;
+const AMOUNT_MAX = 100;
 
 export interface DistributionEntry {
   index: number;
@@ -92,10 +92,10 @@ async function prepareDistribution(): Promise<void> {
   console.log(`Expected minimum:       ${minPossible.toLocaleString()} (${AMOUNT_MIN} × ${wallets.length.toLocaleString()})`);
   console.log(`Expected maximum:       ${maxPossible.toLocaleString()} (${AMOUNT_MAX} × ${wallets.length.toLocaleString()})`);
   console.log(`Total wei:              ${(totalTokens * BigInt(10 ** 18)).toString()}`);
-  const multiBatchSize = Math.max(20, Math.min(500, Number(process.env.BATCH_SIZE ?? 50)));
+  const multiBatchSize = resolveMultiBatchSizeFromEnv();
   const estOnChainBatches = countBatchesForWalletCount(wallets.length, multiBatchSize);
   console.log(
-    `On-chain batches (est.): ${estOnChainBatches.toLocaleString()} — tail ≤50 wallets = one tx; else up to ${multiBatchSize}/tx`
+    `On-chain batches (est.): ${estOnChainBatches.toLocaleString()} — up to ${multiBatchSize} wallets per multisend tx`
   );
   console.log("─────────────────────────────────────────────────\n");
 

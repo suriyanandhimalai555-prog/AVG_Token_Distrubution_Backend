@@ -1,30 +1,25 @@
 /**
- * On-chain distribution chunking (must stay in sync with scripts/distribute.ts).
- * When the unsent tail is at most SINGLE_TX_REMAINING_THRESHOLD wallets, send
- * them in one multisend tx; otherwise chunk by multiBatchSize (default 50).
+ * Fixed-size on-chain multisend batches (must stay in sync with scripts/distribute.ts).
+ * Default 100 wallets per tx; override with BATCH_SIZE env (capped by contract max).
  */
-export const SINGLE_TX_REMAINING_THRESHOLD = 50;
+export const MULTISENDER_MAX_PER_TX = 350;
+
+export function resolveMultiBatchSizeFromEnv(): number {
+  const raw = Number(process.env.BATCH_SIZE ?? 100);
+  return Math.min(MULTISENDER_MAX_PER_TX, Math.max(1, Math.floor(Number.isFinite(raw) ? raw : 100)));
+}
 
 export function countBatchesForWalletCount(walletCount: number, multiBatchSize: number): number {
   if (walletCount <= 0) return 0;
-  let batches = 0;
-  let rem = walletCount;
-  while (rem > 0) {
-    const size = rem <= SINGLE_TX_REMAINING_THRESHOLD ? rem : multiBatchSize;
-    rem -= size;
-    batches++;
-  }
-  return batches;
+  const size = Math.min(MULTISENDER_MAX_PER_TX, Math.max(1, multiBatchSize));
+  return Math.ceil(walletCount / size);
 }
 
-export function chunkUnsentBatches<T>(entries: T[], multiBatchSize: number): T[][] {
+export function chunkFixedBatches<T>(entries: T[], multiBatchSize: number): T[][] {
+  const size = Math.min(MULTISENDER_MAX_PER_TX, Math.max(1, multiBatchSize));
   const chunks: T[][] = [];
-  let i = 0;
-  while (i < entries.length) {
-    const remaining = entries.length - i;
-    const size = remaining <= SINGLE_TX_REMAINING_THRESHOLD ? remaining : multiBatchSize;
+  for (let i = 0; i < entries.length; i += size) {
     chunks.push(entries.slice(i, i + size));
-    i += size;
   }
   return chunks;
 }
