@@ -3,6 +3,8 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import { getScriptsDir } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
@@ -17,7 +19,7 @@ type Network = (typeof VALID_NETWORKS)[number];
  * Writes result to output/deployments.json
  * Returns: { address, network, chainId, deployedAt }
  */
-router.post("/multisender", (req: Request, res: Response) => {
+router.post("/multisender", requireAuth, requirePlan, (req: Request, res: Response) => {
   const { privateKey, network = "bscMainnet" } = req.body as {
     privateKey: string;
     network?: string;

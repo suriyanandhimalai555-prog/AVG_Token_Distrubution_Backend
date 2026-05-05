@@ -1,17 +1,23 @@
 import { Router, Request, Response } from "express";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
+import { assertSessionOwned } from "../lib/sessionAccess";
 
 const router = Router();
 
 // GET /api/batches?sessionId=&skip=&limit=
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.query as { sessionId: string };
     const skip = parseInt((req.query.skip as string) ?? "0", 10);
     const limit = parseInt((req.query.limit as string) ?? "20", 10);
 
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+
+    const owns = await assertSessionOwned(sessionId, req.user!._id);
+    if (!owns) return res.status(404).json({ error: "Session not found" });
 
     const [batches, total] = await Promise.all([
       Batch.find({ sessionId }).sort({ batchIndex: -1 }).skip(skip).limit(limit).lean(),
@@ -26,13 +32,16 @@ router.get("/", async (req: Request, res: Response) => {
 });
 
 // GET /api/batches/wallets?sessionId=&skip=&limit=
-router.get("/wallets", async (req: Request, res: Response) => {
+router.get("/wallets", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.query as { sessionId: string };
     const skip = parseInt((req.query.skip as string) ?? "0", 10);
     const limit = parseInt((req.query.limit as string) ?? "50", 10);
 
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+
+    const owns = await assertSessionOwned(sessionId, req.user!._id);
+    if (!owns) return res.status(404).json({ error: "Session not found" });
 
     const [wallets, total] = await Promise.all([
       Wallet.find({ sessionId }).sort({ index: 1 }).skip(skip).limit(limit).lean(),
@@ -47,10 +56,13 @@ router.get("/wallets", async (req: Request, res: Response) => {
 });
 
 // GET /api/batches/wallets/summary?sessionId=
-router.get("/wallets/summary", async (req: Request, res: Response) => {
+router.get("/wallets/summary", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.query as { sessionId: string };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+
+    const owns = await assertSessionOwned(sessionId, req.user!._id);
+    if (!owns) return res.status(404).json({ error: "Session not found" });
 
     const [stats] = await Wallet.aggregate([
       { $match: { sessionId } },

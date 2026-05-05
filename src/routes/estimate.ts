@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { Session } from "../models/Session";
 import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../lib/distributionBatching";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
@@ -41,7 +43,7 @@ function resolveMainnetRpcUrl(): string {
   );
 }
 
-router.post("/preflight", async (req: Request, res: Response) => {
+router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId, privateKey, network: requestedNetwork } = req.body as {
       sessionId: string;
@@ -54,6 +56,10 @@ router.post("/preflight", async (req: Request, res: Response) => {
 
     const session = await Session.findById(sessionId).lean();
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const targetNetwork =
       requestedNetwork === "bscTestnet" || requestedNetwork === "bscMainnet"

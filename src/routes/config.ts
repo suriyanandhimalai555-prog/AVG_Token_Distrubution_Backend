@@ -2,6 +2,8 @@ import { Router, Request, Response } from "express";
 import path from "path";
 import fs from "fs";
 import { getScriptsDir } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
@@ -12,7 +14,7 @@ const router = Router();
  *  - multisender from output/deployments.json (written by deploy-multisender.ts)
  *  - Does NOT return PRIVATE_KEY or TOKEN_ADDRESS (user provides those in the form)
  */
-router.get("/", (_req: Request, res: Response) => {
+router.get("/", requireAuth, requirePlan, (_req: Request, res: Response) => {
   try {
     const scriptsDir = getScriptsDir();
     const envPath = path.join(scriptsDir, ".env");

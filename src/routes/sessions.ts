@@ -2,12 +2,20 @@ import { Router, Request, Response } from "express";
 import { Session } from "../models/Session";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
+import { requireAuth } from "../middleware/requireAuth";
+import { Subscription } from "../models/Subscription";
 
 const router = Router();
+router.use(requireAuth);
 
 // POST /api/sessions — create a new session
 router.post("/", async (req: Request, res: Response) => {
   try {
+    const sub = await Subscription.findOne({ userId: req.user!._id, status: "ACTIVE" });
+    if (!sub) {
+      return res.status(403).json({ error: "No active plan", code: "NO_ACTIVE_PLAN" });
+    }
+
     const { totalWallets, network, tokenAddress, tokenName, multisenderAddress } = req.body as {
       totalWallets: number;
       network: "bscMainnet" | "bscTestnet";
@@ -29,7 +37,14 @@ router.post("/", async (req: Request, res: Response) => {
     if (!tokenName) return res.status(400).json({ error: "tokenName is required" });
     if (!multisenderAddress) return res.status(400).json({ error: "multisenderAddress is required" });
 
+    if (!Number.isFinite(totalWallets) || totalWallets > sub.walletLimit) {
+      return res.status(403).json({
+        error: `Your plan allows max ${sub.walletLimit} wallets.`,
+      });
+    }
+
     const session = await Session.create({
+      userId: req.user!._id,
       totalWallets,
       network,
       tokenAddress,
@@ -49,9 +64,9 @@ router.post("/", async (req: Request, res: Response) => {
 });
 
 // GET /api/sessions — list all sessions (most recent first)
-router.get("/", async (_req: Request, res: Response) => {
+router.get("/", async (req: Request, res: Response) => {
   try {
-    const sessions = await Session.find().sort({ createdAt: -1 }).limit(50).lean();
+    const sessions = await Session.find({ userId: req.user!._id }).sort({ createdAt: -1 }).limit(50).lean();
     return res.json({ sessions });
   } catch (err) {
     console.error("[sessions GET]", err);
@@ -64,6 +79,10 @@ router.get("/:id", async (req: Request, res: Response) => {
   try {
     const session = await Session.findById(req.params.id).lean();
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const [batchCount, walletCount] = await Promise.all([
       Batch.countDocuments({ sessionId: req.params.id }),
@@ -80,6 +99,11 @@ router.get("/:id", async (req: Request, res: Response) => {
 // PATCH /api/sessions/:id — partial update
 router.patch("/:id", async (req: Request, res: Response) => {
   try {
+    const existing = await Session.findById(req.params.id).lean();
+    if (!existing || !existing.userId || existing.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
     const session = await Session.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (!session) return res.status(404).json({ error: "Session not found" });
     return res.json({ session });

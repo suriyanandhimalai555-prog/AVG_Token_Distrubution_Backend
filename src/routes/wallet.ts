@@ -1,5 +1,7 @@
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
@@ -28,7 +30,7 @@ function resolveTestnetRpcUrl(): string {
   );
 }
 
-router.post("/preview", async (req: Request, res: Response) => {
+router.post("/preview", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { privateKey, tokenAddress, network } = req.body as {
       privateKey: string;

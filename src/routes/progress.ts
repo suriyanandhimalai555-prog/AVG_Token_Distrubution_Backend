@@ -1,14 +1,22 @@
 import { Router, Request, Response } from "express";
 import { addSseClient, removeSseClient } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { assertSessionOwned } from "../lib/sessionAccess";
 
 const router = Router();
 
 // GET /api/progress?sessionId=xxx — SSE stream
-router.get("/", (req: Request, res: Response) => {
+router.get("/", requireAuth, async (req: Request, res: Response) => {
   const { sessionId } = req.query as { sessionId: string };
 
   if (!sessionId) {
     res.status(400).json({ error: "sessionId query param required" });
+    return;
+  }
+
+  const ok = await assertSessionOwned(sessionId, req.user!._id);
+  if (!ok) {
+    res.status(404).json({ error: "Session not found" });
     return;
   }
 

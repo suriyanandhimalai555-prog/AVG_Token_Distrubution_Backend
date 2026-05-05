@@ -3,17 +3,23 @@ import { Session } from "../models/Session";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
 import { isRunning } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
 // GET /api/status?sessionId=xxx — live session status
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.query as { sessionId: string };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
 
     const session = await Session.findById(sessionId).lean();
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const [batchCount, confirmedBatches, failedBatches, sentWallets] = await Promise.all([
       Batch.countDocuments({ sessionId }),

@@ -4,11 +4,13 @@ import path from "path";
 import { Session } from "../models/Session";
 import { Wallet } from "../models/Wallet";
 import { runGenerate, getScriptsDir, isRunning } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
 // POST /api/generate — spawn generate-wallets.ts
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId, privateKey } = req.body as { sessionId: string; privateKey?: string };
 
@@ -16,6 +18,10 @@ router.post("/", async (req: Request, res: Response) => {
 
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     if (isRunning(sessionId)) {
       return res.status(409).json({ error: "Generation already running for this session" });

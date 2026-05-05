@@ -5,11 +5,13 @@ import { Session } from "../models/Session";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
 import { runDistribute, killProcess, getScriptsDir, isRunning } from "../lib/runner";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
 // POST /api/distribute — spawn distribute.ts
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId, privateKey } = req.body as { sessionId: string; privateKey: string };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
@@ -17,6 +19,10 @@ router.post("/", async (req: Request, res: Response) => {
 
     const session = await Session.findById(sessionId);
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     if (isRunning(sessionId)) {
       return res.status(409).json({ error: "Distribution already running for this session" });
@@ -128,10 +134,15 @@ router.post("/", async (req: Request, res: Response) => {
 });
 
 // DELETE /api/distribute — kill running process
-router.delete("/", async (req: Request, res: Response) => {
+router.delete("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.body as { sessionId: string };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+
+    const sess = await Session.findById(sessionId).lean();
+    if (!sess || !sess.userId || sess.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const killed = killProcess(sessionId);
     await Session.findByIdAndUpdate(sessionId, { status: "stopped" });

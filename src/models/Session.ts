@@ -1,6 +1,7 @@
 import mongoose, { Document, Schema } from "mongoose";
 
 export interface ISession extends Document {
+  userId?: mongoose.Types.ObjectId;
   createdAt: Date;
   totalWallets: number;
   network: "bscMainnet" | "bscTestnet";
@@ -18,6 +19,7 @@ export interface ISession extends Document {
 
 const SessionSchema = new Schema<ISession>(
   {
+    userId: { type: Schema.Types.ObjectId, ref: "User" },
     totalWallets: { type: Number, required: true },
     network: { type: String, enum: ["bscMainnet", "bscTestnet"], required: true, default: "bscMainnet" },
     tokenAddress: { type: String, required: true },

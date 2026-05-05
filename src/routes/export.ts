@@ -7,6 +7,8 @@ import { Batch } from "../models/Batch";
 import { getScriptsDir } from "../lib/runner";
 import ExcelJS from "exceljs";
 import { ethers } from "ethers";
+import { requireAuth } from "../middleware/requireAuth";
+import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 const ERC20_ABI = [
@@ -94,7 +96,7 @@ async function nativeBalanceByAddress(addresses: string[], rpcUrl: string): Prom
 }
 
 // GET /api/export?sessionId=xxx&file=csv|xlsx|wallets|json
-router.get("/", async (req: Request, res: Response) => {
+router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
     const { sessionId, file } = req.query as { sessionId: string; file: string };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
@@ -104,6 +106,10 @@ router.get("/", async (req: Request, res: Response) => {
 
     const session = await Session.findById(sessionId).lean();
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    if (!session.userId || session.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const scriptsDir = getScriptsDir();
 
