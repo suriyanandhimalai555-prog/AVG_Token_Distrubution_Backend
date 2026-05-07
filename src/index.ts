@@ -58,6 +58,7 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 const sessionSecret = process.env.SESSION_SECRET ?? "dev-only-change-me-SESSION_SECRET";
+const isProd = process.env.NODE_ENV === "production";
 
 const sessionMiddleware = session({
   secret: sessionSecret,
@@ -71,10 +72,12 @@ const sessionMiddleware = session({
         })
       : undefined,
   cookie: {
-    secure: process.env.NODE_ENV === "production",
+    secure: isProd,
     httpOnly: true,
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    sameSite: "lax",
+    // Cross-site frontend/backend in production (holderforge.io -> railway.app)
+    // requires SameSite=None + Secure for session cookie persistence.
+    sameSite: isProd ? "none" : "lax",
   },
 });
 
