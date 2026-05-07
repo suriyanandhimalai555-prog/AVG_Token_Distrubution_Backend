@@ -9,6 +9,8 @@ export interface IWallet extends Document {
   amountWei: string;
   packedHex: string;
   sent: boolean;
+  failed?: boolean;
+  failureReason?: string;
   txHash?: string;
   timestamp?: Date;
   batchId?: string;
@@ -23,6 +25,8 @@ const WalletSchema = new Schema<IWallet>({
   amountWei: { type: String, required: true },
   packedHex: { type: String, required: true },
   sent: { type: Boolean, default: false, index: true },
+  failed: { type: Boolean, default: false, index: true },
+  failureReason: { type: String },
   txHash: { type: String },
   timestamp: { type: Date },
   batchId: { type: String },

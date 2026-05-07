@@ -6,6 +6,7 @@ import { Wallet } from "../models/Wallet";
 import { runPrepare, getScriptsDir, isRunning } from "../lib/runner";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
+import { recordSessionAudit } from "../lib/sessionAudit";
 
 const router = Router();
 
@@ -27,6 +28,13 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
     }
 
     await Session.findByIdAndUpdate(sessionId, { status: "preparing" });
+    await recordSessionAudit({
+      userId: req.user!._id,
+      sessionId,
+      action: "PREPARE_STARTED",
+      message: "Distribution planning started",
+      details: { totalWallets: session.totalWallets },
+    });
 
     runPrepare(
       sessionId,
@@ -53,6 +61,8 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
                   amountWei: entry.amountWei,
                   packedHex: entry.packedHex,
                   sent: entry.sent,
+                  failed: false,
+                  failureReason: undefined,
                   address: entry.address,
                 },
               },
@@ -67,11 +77,25 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
         }
 
         await Session.findByIdAndUpdate(sessionId, { status: "idle" });
+        await recordSessionAudit({
+          userId: req.user!._id,
+          sessionId,
+          action: "PREPARE_COMPLETED",
+          message: "Distribution planning completed",
+          details: { totalTokens, batchCount },
+        });
         console.log(`[prepare] done. tokens=${totalTokens}, batches=${batchCount}`);
       },
       async (err) => {
         console.error("[prepare] error:", err);
         await Session.findByIdAndUpdate(sessionId, { status: "error" });
+        await recordSessionAudit({
+          userId: req.user!._id,
+          sessionId,
+          action: "PREPARE_FAILED",
+          message: "Distribution planning failed",
+          details: { error: String(err) },
+        });
       }
     );
 

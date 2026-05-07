@@ -156,7 +156,7 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
       try {
         const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as PlanEntry[];
         for (const p of plan) {
-          if (typeof p.index === "number" && p.txHash) {
+          if (typeof p.index === "number" && p.sent && p.txHash) {
             txHashByIndex.set(p.index, String(p.txHash));
           }
         }
@@ -173,11 +173,30 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
       res.setHeader("Content-Type", "text/csv");
 
       const lines = [
-        "Wallet Address,Seed Phrase (Mnemonic),Network,Native Balance,Token Name,Transaction Hash,Token Balance",
+        "Wallet Address,Seed Phrase (Mnemonic),Network,Native Balance,Token Name,Transaction Hash,Token Balance,Status,Failure Reason",
       ];
       for (const w of wallets) {
         const txHash = txHashByIndex.get(w.index) ?? (w.txHash ?? "");
+        const sentResolved = Boolean(w.sent || txHash);
+        const failedResolved =
+          sentResolved
+            ? false
+            : Boolean(
+                w.failed ||
+                ((session.status === "stopped" || session.status === "error" || session.status === "done") && !sentResolved)
+              );
         const distributedTokens = String(w.amount ?? 0);
+        const status = sentResolved ? "CONFIRMED" : (failedResolved ? "FAILED" : "PENDING");
+        const failureReason = sentResolved
+          ? ""
+          : (
+              w.failureReason ??
+              (session.status === "stopped"
+                ? "Stopped by user (remaining wallets cancelled)"
+                : session.status === "error" || session.status === "done"
+                  ? "Failed to send (insufficient gas/BNB or batch failure)"
+                  : "")
+            );
         lines.push(
           [
             csvEscape(w.address),
@@ -187,6 +206,8 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
             csvEscape(tokenNameResolved),
             csvEscape(String(txHash)),
             csvEscape(distributedTokens),
+            csvEscape(status),
+            csvEscape(failureReason),
           ].join(",")
         );
       }
@@ -205,10 +226,20 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
         { header: "Token Name", key: "tokenName", width: 20 },
         { header: "Transaction Hash", key: "transactionHash", width: 68 },
         { header: "Token Balance", key: "tokenBalance", width: 16 },
+        { header: "Status", key: "status", width: 14 },
+        { header: "Failure Reason", key: "failureReason", width: 52 },
       ];
 
       for (const w of wallets) {
         const txHash = txHashByIndex.get(w.index) ?? (w.txHash ?? "");
+        const sentResolved = Boolean(w.sent || txHash);
+        const failedResolved =
+          sentResolved
+            ? false
+            : Boolean(
+                w.failed ||
+                ((session.status === "stopped" || session.status === "error" || session.status === "done") && !sentResolved)
+              );
         sheet.addRow({
           walletAddress: w.address,
           mnemonic,
@@ -217,6 +248,17 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
           tokenName: tokenNameResolved,
           transactionHash: txHash,
           tokenBalance: String(w.amount ?? 0),
+          status: sentResolved ? "CONFIRMED" : (failedResolved ? "FAILED" : "PENDING"),
+          failureReason: sentResolved
+            ? ""
+            : (
+                w.failureReason ??
+                (session.status === "stopped"
+                  ? "Stopped by user (remaining wallets cancelled)"
+                  : session.status === "error" || session.status === "done"
+                    ? "Failed to send (insufficient gas/BNB or batch failure)"
+                    : "")
+              ),
         });
       }
 

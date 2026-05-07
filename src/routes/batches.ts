@@ -1,9 +1,13 @@
 import { Router, Request, Response } from "express";
+import fs from "fs";
+import path from "path";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
+import { Session } from "../models/Session";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
 import { assertSessionOwned } from "../lib/sessionAccess";
+import { getScriptsDir } from "../lib/runner";
 
 const router = Router();
 
@@ -43,12 +47,66 @@ router.get("/wallets", requireAuth, requirePlan, async (req: Request, res: Respo
     const owns = await assertSessionOwned(sessionId, req.user!._id);
     if (!owns) return res.status(404).json({ error: "Session not found" });
 
-    const [wallets, total] = await Promise.all([
+    const [wallets, total, session] = await Promise.all([
       Wallet.find({ sessionId }).sort({ index: 1 }).skip(skip).limit(limit).lean(),
       Wallet.countDocuments({ sessionId }),
+      Session.findById(sessionId).lean(),
     ]);
 
-    return res.json({ wallets, total });
+    // Fallback sync from distribution-plan.json for older/stale sessions where
+    // wallet documents were not fully updated.
+    const planPath = path.join(getScriptsDir(), "output", "distribution-plan.json");
+    const planByIndex = new Map<number, { sent: boolean; txHash?: string | null; timestamp?: string | null }>();
+    if (fs.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs.readFileSync(planPath, "utf8")) as Array<{
+          index: number;
+          sent: boolean;
+          txHash?: string | null;
+          timestamp?: string | null;
+        }>;
+        for (const p of plan) {
+          planByIndex.set(p.index, p);
+        }
+      } catch {
+        // ignore malformed plan file and fall back to DB fields
+      }
+    }
+
+    const walletsResolved = wallets.map((w) => {
+      const p = planByIndex.get(Number(w.index));
+      const sentResolved = Boolean(w.sent || p?.sent || w.txHash || p?.txHash);
+      const txHashResolved = w.txHash ?? p?.txHash ?? undefined;
+      const timestampResolved = w.timestamp ?? (p?.timestamp ? new Date(p.timestamp) : undefined);
+      const legacyPending = !sentResolved && w.failureReason === "Not sent yet";
+      const failedResolved =
+        sentResolved
+          ? false
+          : Boolean(
+              (w.failed && !legacyPending) ||
+              ((session?.status === "stopped" || session?.status === "error" || session?.status === "done") && !sentResolved)
+            );
+      const failureReasonResolved = sentResolved
+        ? undefined
+        : (legacyPending
+          ? undefined
+          : w.failureReason ??
+          (session?.status === "stopped" ? "Stopped by user" : undefined) ??
+          ((session?.status === "error" || session?.status === "done")
+            ? "Failed to send (insufficient gas/BNB or batch failure)"
+            : undefined));
+
+      return {
+        ...w,
+        sent: sentResolved,
+        txHash: txHashResolved,
+        timestamp: timestampResolved,
+        failed: failedResolved,
+        failureReason: failureReasonResolved,
+      };
+    });
+
+    return res.json({ wallets: walletsResolved, total });
   } catch (err) {
     console.error("[batches/wallets GET]", err);
     return res.status(500).json({ error: "Failed to get wallets" });

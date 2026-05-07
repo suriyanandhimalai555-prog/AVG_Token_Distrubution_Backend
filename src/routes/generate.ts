@@ -6,6 +6,7 @@ import { Wallet } from "../models/Wallet";
 import { runGenerate, getScriptsDir, isRunning } from "../lib/runner";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
+import { recordSessionAudit } from "../lib/sessionAudit";
 
 const router = Router();
 
@@ -29,6 +30,13 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
 
     await Session.findByIdAndUpdate(sessionId, { status: "generating", startedAt: new Date() });
     await Wallet.deleteMany({ sessionId });
+    await recordSessionAudit({
+      userId: req.user!._id,
+      sessionId,
+      action: "GENERATE_STARTED",
+      message: "Wallet generation started",
+      details: { totalWallets: session.totalWallets },
+    });
 
     runGenerate(
       sessionId,
@@ -58,6 +66,7 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
               amountWei: "0",
               packedHex: "0x",
               sent: false,
+              failed: false,
             };
           }).filter((d) => d.address);
 
@@ -68,10 +77,24 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
         }
 
         await Session.findByIdAndUpdate(sessionId, { status: "idle" });
+        await recordSessionAudit({
+          userId: req.user!._id,
+          sessionId,
+          action: "GENERATE_COMPLETED",
+          message: "Wallet generation completed",
+          details: { importedWallets: session.totalWallets },
+        });
       },
       async (err) => {
         console.error("[generate] error:", err);
         await Session.findByIdAndUpdate(sessionId, { status: "error" });
+        await recordSessionAudit({
+          userId: req.user!._id,
+          sessionId,
+          action: "GENERATE_FAILED",
+          message: "Wallet generation failed",
+          details: { error: String(err) },
+        });
       }
     );
 

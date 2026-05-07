@@ -4,6 +4,9 @@ import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
 import { requireAuth } from "../middleware/requireAuth";
 import { Subscription } from "../models/Subscription";
+import { isRunning } from "../lib/runner";
+import { recordSessionAudit } from "../lib/sessionAudit";
+import { SessionAudit } from "../models/SessionAudit";
 
 const router = Router();
 router.use(requireAuth);
@@ -11,8 +14,11 @@ router.use(requireAuth);
 // POST /api/sessions — create a new session
 router.post("/", async (req: Request, res: Response) => {
   try {
-    const sub = await Subscription.findOne({ userId: req.user!._id, status: "ACTIVE" });
-    if (!sub) {
+    const isAdmin = req.user?.role === "ADMIN";
+    const sub = isAdmin
+      ? null
+      : await Subscription.findOne({ userId: req.user!._id, status: "ACTIVE" });
+    if (!isAdmin && !sub) {
       return res.status(403).json({ error: "No active plan", code: "NO_ACTIVE_PLAN" });
     }
 
@@ -37,9 +43,9 @@ router.post("/", async (req: Request, res: Response) => {
     if (!tokenName) return res.status(400).json({ error: "tokenName is required" });
     if (!multisenderAddress) return res.status(400).json({ error: "multisenderAddress is required" });
 
-    if (!Number.isFinite(totalWallets) || totalWallets > sub.walletLimit) {
+    if (!isAdmin && (!Number.isFinite(totalWallets) || totalWallets > (sub?.walletLimit ?? 0))) {
       return res.status(403).json({
-        error: `Your plan allows max ${sub.walletLimit} wallets.`,
+        error: `Your plan allows max ${sub?.walletLimit ?? 0} wallets.`,
       });
     }
 
@@ -54,6 +60,20 @@ router.post("/", async (req: Request, res: Response) => {
       sentCount: 0,
       failedCount: 0,
       bnbSpent: 0,
+    });
+
+    await recordSessionAudit({
+      userId: req.user!._id,
+      sessionId: session._id.toString(),
+      action: "SESSION_CREATED",
+      message: "Session created from setup",
+      details: {
+        network,
+        totalWallets,
+        tokenAddress,
+        tokenName,
+        multisenderAddress,
+      },
     });
 
     return res.status(201).json({ sessionId: session._id.toString(), session });
@@ -71,6 +91,21 @@ router.get("/", async (req: Request, res: Response) => {
   } catch (err) {
     console.error("[sessions GET]", err);
     return res.status(500).json({ error: "Failed to list sessions" });
+  }
+});
+
+// GET /api/sessions/history — audit timeline for this user
+router.get("/history", async (req: Request, res: Response) => {
+  try {
+    const limit = Math.min(500, Math.max(1, parseInt((req.query.limit as string) ?? "200", 10)));
+    const audits = await SessionAudit.find({ userId: req.user!._id })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    return res.json({ audits });
+  } catch (err) {
+    console.error("[sessions/history GET]", err);
+    return res.status(500).json({ error: "Failed to load session history" });
   }
 });
 
@@ -104,12 +139,120 @@ router.patch("/:id", async (req: Request, res: Response) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    const session = await Session.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (isRunning(req.params.id)) {
+      return res.status(409).json({ error: "Cannot update setup while process is running. Stop first." });
+    }
+
+    const patch = req.body as Partial<{
+      totalWallets: number;
+      network: "bscMainnet" | "bscTestnet";
+      tokenAddress: string;
+      tokenName: string;
+      multisenderAddress: string;
+    }>;
+
+    const nextTotalWallets = patch.totalWallets ?? existing.totalWallets;
+    if (!Number.isFinite(nextTotalWallets) || nextTotalWallets < 1 || nextTotalWallets > 100_000) {
+      return res.status(400).json({ error: "totalWallets must be between 1 and 100,000" });
+    }
+
+    const isAdmin = req.user?.role === "ADMIN";
+    if (!isAdmin) {
+      const sub = await Subscription.findOne({ userId: req.user!._id, status: "ACTIVE" });
+      if (!sub) {
+        return res.status(403).json({ error: "No active plan", code: "NO_ACTIVE_PLAN" });
+      }
+      if (nextTotalWallets > sub.walletLimit) {
+        return res.status(403).json({ error: `Your plan allows max ${sub.walletLimit} wallets.` });
+      }
+    }
+
+    const setupChanged =
+      (patch.totalWallets !== undefined && patch.totalWallets !== existing.totalWallets) ||
+      (patch.network !== undefined && patch.network !== existing.network) ||
+      (patch.tokenAddress !== undefined && patch.tokenAddress !== existing.tokenAddress) ||
+      (patch.multisenderAddress !== undefined && patch.multisenderAddress !== existing.multisenderAddress);
+
+    if (setupChanged) {
+      await Promise.all([
+        Wallet.deleteMany({ sessionId: req.params.id }),
+        Batch.deleteMany({ sessionId: req.params.id }),
+      ]);
+      Object.assign(patch, {
+        status: "idle",
+        sentCount: 0,
+        failedCount: 0,
+        bnbSpent: 0,
+        startedAt: undefined,
+        completedAt: undefined,
+        masterMnemonic: undefined,
+      });
+    }
+
+    const session = await Session.findByIdAndUpdate(req.params.id, patch, { new: true });
     if (!session) return res.status(404).json({ error: "Session not found" });
+
+    await recordSessionAudit({
+      userId: req.user!._id,
+      sessionId: req.params.id,
+      action: setupChanged ? "SESSION_SETUP_UPDATED" : "SESSION_UPDATED",
+      message: setupChanged
+        ? "Setup fields changed; run data reset"
+        : "Session metadata updated",
+      details: {
+        updatedFields: Object.keys(req.body ?? {}),
+        setupChanged,
+      },
+    });
+
     return res.json({ session });
   } catch (err) {
     console.error("[sessions/:id PATCH]", err);
     return res.status(500).json({ error: "Failed to update session" });
+  }
+});
+
+// DELETE /api/sessions/:id — delete one session and related data
+router.delete("/:id", async (req: Request, res: Response) => {
+  try {
+    const existing = await Session.findById(req.params.id).lean();
+    if (!existing || !existing.userId || existing.userId.toString() !== req.user!._id.toString()) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    if (isRunning(req.params.id)) {
+      return res.status(409).json({ error: "Cannot delete while distribution is running. Stop it first." });
+    }
+
+    await Promise.all([
+      Wallet.deleteMany({ sessionId: req.params.id }),
+      Batch.deleteMany({ sessionId: req.params.id }),
+      Session.deleteOne({ _id: req.params.id }),
+    ]);
+
+    await recordSessionAudit({
+      userId: req.user!._id,
+      sessionId: req.params.id,
+      action: "SESSION_DELETED",
+      message: "Session deleted by user",
+      details: {
+        snapshot: {
+          status: existing.status,
+          totalWallets: existing.totalWallets,
+          sentCount: existing.sentCount,
+          failedCount: existing.failedCount,
+          bnbSpent: existing.bnbSpent,
+          network: existing.network,
+          tokenAddress: existing.tokenAddress,
+          tokenName: existing.tokenName,
+        },
+      },
+    });
+
+    return res.json({ success: true, deletedSessionId: req.params.id });
+  } catch (err) {
+    console.error("[sessions/:id DELETE]", err);
+    return res.status(500).json({ error: "Failed to delete session" });
   }
 });
 
