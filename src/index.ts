@@ -59,18 +59,39 @@ app.use(express.urlencoded({ extended: true }));
 
 const sessionSecret = process.env.SESSION_SECRET ?? "dev-only-change-me-SESSION_SECRET";
 const isProd = process.env.NODE_ENV === "production";
+const mongoUrl = process.env.MONGODB_URI;
+const useMongoSessionStore = process.env.USE_MONGO_SESSION_STORE !== "false";
+
+function buildSessionStore(): session.Store | undefined {
+  if (!mongoUrl || !useMongoSessionStore) {
+    if (!mongoUrl) console.warn("[session] MONGODB_URI missing — using MemoryStore");
+    if (!useMongoSessionStore) console.warn("[session] USE_MONGO_SESSION_STORE=false — using MemoryStore");
+    return undefined;
+  }
+
+  try {
+    const store = MongoStore.create({
+      mongoUrl,
+      ttl: 7 * 24 * 60 * 60,
+    });
+    // Prevent process crash when Mongo session store emits connection errors.
+    store.on("error", (err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[session] MongoStore error: ${msg} (continuing with degraded sessions)`);
+    });
+    return store;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[session] Failed to initialize MongoStore: ${msg} (using MemoryStore)`);
+    return undefined;
+  }
+}
 
 const sessionMiddleware = session({
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
-  store:
-    process.env.MONGODB_URI != null && process.env.MONGODB_URI.length > 0
-      ? MongoStore.create({
-          mongoUrl: process.env.MONGODB_URI,
-          ttl: 7 * 24 * 60 * 60,
-        })
-      : undefined,
+  store: buildSessionStore(),
   cookie: {
     secure: isProd,
     httpOnly: true,
