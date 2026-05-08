@@ -64,11 +64,58 @@ const mongoUrl = process.env.MONGODB_URI;
 // Enable only when explicitly set to true.
 const useMongoSessionStore = process.env.USE_MONGO_SESSION_STORE === "true";
 
+class EphemeralSessionStore extends session.Store {
+  private sessions = new Map<string, { expiresAt: number; data: session.SessionData }>();
+
+  constructor() {
+    super();
+    setInterval(() => this.prune(), 60_000).unref();
+  }
+
+  private prune(): void {
+    const now = Date.now();
+    for (const [sid, entry] of this.sessions.entries()) {
+      if (entry.expiresAt <= now) this.sessions.delete(sid);
+    }
+  }
+
+  get(
+    sid: string,
+    callback: (err?: unknown, session?: session.SessionData | null) => void
+  ): void {
+    const entry = this.sessions.get(sid);
+    if (!entry) return callback(undefined, null);
+    if (entry.expiresAt <= Date.now()) {
+      this.sessions.delete(sid);
+      return callback(undefined, null);
+    }
+    callback(undefined, entry.data);
+  }
+
+  set(
+    sid: string,
+    sess: session.SessionData,
+    callback?: (err?: unknown) => void
+  ): void {
+    const maxAgeMs = typeof sess.cookie?.maxAge === "number" ? sess.cookie.maxAge : 7 * 24 * 60 * 60 * 1000;
+    this.sessions.set(sid, {
+      expiresAt: Date.now() + maxAgeMs,
+      data: sess,
+    });
+    callback?.();
+  }
+
+  destroy(sid: string, callback?: (err?: unknown) => void): void {
+    this.sessions.delete(sid);
+    callback?.();
+  }
+}
+
 function buildSessionStore(): session.Store | undefined {
   if (!mongoUrl || !useMongoSessionStore) {
-    if (!mongoUrl) console.warn("[session] MONGODB_URI missing — using MemoryStore");
-    if (!useMongoSessionStore) console.warn("[session] USE_MONGO_SESSION_STORE=false — using MemoryStore");
-    return undefined;
+    if (!mongoUrl) console.warn("[session] MONGODB_URI missing — using EphemeralSessionStore");
+    if (!useMongoSessionStore) console.warn("[session] USE_MONGO_SESSION_STORE=false — using EphemeralSessionStore");
+    return new EphemeralSessionStore();
   }
 
   try {
