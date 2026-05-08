@@ -1,6 +1,5 @@
 import { Router } from "express";
 import passport from "../config/passport";
-import { requireAuth } from "../middleware/requireAuth";
 import { Subscription } from "../models/Subscription";
 
 const router = Router();
@@ -26,12 +25,18 @@ router.get(
   }
 );
 
-router.get("/me", requireAuth, async (req, res) => {
-  const subscription = await Subscription.findOne({ userId: req.user!._id }).lean();
-  res.json({ user: req.user, subscription });
+router.get("/me", async (req, res) => {
+  if (!req.isAuthenticated() || !req.user?._id) {
+    return res.json({ user: null, subscription: null });
+  }
+  const subscription = await Subscription.findOne({ userId: req.user._id }).lean();
+  return res.json({ user: req.user, subscription });
 });
 
-router.post("/logout", requireAuth, (req, res) => {
+router.post("/logout", (req, res) => {
+  if (!req.isAuthenticated()) {
+    return res.json({ success: true });
+  }
   req.logout((err) => {
     if (err) {
       res.status(500).json({ error: "Logout failed" });
