@@ -60,7 +60,9 @@ app.use(express.urlencoded({ extended: true }));
 const sessionSecret = process.env.SESSION_SECRET ?? "dev-only-change-me-SESSION_SECRET";
 const isProd = process.env.NODE_ENV === "production";
 const mongoUrl = process.env.MONGODB_URI;
-const useMongoSessionStore = process.env.USE_MONGO_SESSION_STORE !== "false";
+// Default OFF for stability: Atlas TLS/network issues should not crash auth/session.
+// Enable only when explicitly set to true.
+const useMongoSessionStore = process.env.USE_MONGO_SESSION_STORE === "true";
 
 function buildSessionStore(): session.Store | undefined {
   if (!mongoUrl || !useMongoSessionStore) {
