@@ -14,8 +14,36 @@ const ERC20_ABI = [
 ];
 
 const GAS_LIMIT_PER_BATCH = 4_000_000n;
-const LIKELY_GAS_PER_BATCH = 3_250_000n;
+const REFERENCE_BATCH_SIZE = 100n;
+const LIKELY_GAS_PER_REFERENCE_BATCH = 3_250_000n;
 const GAS_PRICE_GWEI = "3";
+
+function estimateLikelyGasForWallets(totalWallets: number, batchSize: number): {
+  estimatedGasLikely: bigint;
+  estimatedMaxGasPerBatchLikely: bigint;
+} {
+  if (totalWallets <= 0 || batchSize <= 0) {
+    return { estimatedGasLikely: 0n, estimatedMaxGasPerBatchLikely: 0n };
+  }
+
+  let remaining = totalWallets;
+  let estimatedGasLikely = 0n;
+  let estimatedMaxGasPerBatchLikely = 0n;
+
+  while (remaining > 0) {
+    const walletsInBatch = BigInt(Math.min(batchSize, remaining));
+    const likelyGasForBatch =
+      (LIKELY_GAS_PER_REFERENCE_BATCH * walletsInBatch + (REFERENCE_BATCH_SIZE - 1n)) /
+      REFERENCE_BATCH_SIZE;
+    estimatedGasLikely += likelyGasForBatch;
+    if (likelyGasForBatch > estimatedMaxGasPerBatchLikely) {
+      estimatedMaxGasPerBatchLikely = likelyGasForBatch;
+    }
+    remaining -= Number(walletsInBatch);
+  }
+
+  return { estimatedGasLikely, estimatedMaxGasPerBatchLikely };
+}
 
 function resolveRpcUrl(network: "bscMainnet" | "bscTestnet"): string {
   if (network === "bscTestnet") {
@@ -139,7 +167,10 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
     const batchCount = countBatchesForWalletCount(totalWallets, multiBatchSize);
 
     const gasPriceWei = ethers.parseUnits(GAS_PRICE_GWEI, "gwei");
-    const estimatedGasLikely = LIKELY_GAS_PER_BATCH * BigInt(batchCount);
+    const { estimatedGasLikely, estimatedMaxGasPerBatchLikely } = estimateLikelyGasForWallets(
+      totalWallets,
+      multiBatchSize
+    );
     const estimatedGasMax = GAS_LIMIT_PER_BATCH * BigInt(batchCount);
     const estimatedBnbLikelyWei = estimatedGasLikely * gasPriceWei;
     const estimatedBnbMaxWei = estimatedGasMax * gasPriceWei;
@@ -173,6 +204,9 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
         gasPriceGwei: GAS_PRICE_GWEI,
         estimatedGasLikely: estimatedGasLikely.toString(),
         estimatedGasMax: estimatedGasMax.toString(),
+        estimatedLikelyGasPerLargestBatch: estimatedMaxGasPerBatchLikely.toString(),
+        perBatchGasLimit: GAS_LIMIT_PER_BATCH.toString(),
+        mayExceedPerBatchLimit: estimatedMaxGasPerBatchLikely > GAS_LIMIT_PER_BATCH,
         estimatedBnbLikely: ethers.formatEther(estimatedBnbLikelyWei),
         estimatedBnbMax: ethers.formatEther(estimatedBnbMaxWei),
       },
