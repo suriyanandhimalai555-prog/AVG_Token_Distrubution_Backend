@@ -1,7 +1,6 @@
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { Session } from "../models/Session";
-import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../lib/distributionBatching";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
 
@@ -13,36 +12,22 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
 ];
 
-const GAS_LIMIT_PER_BATCH = 4_000_000n;
-const REFERENCE_BATCH_SIZE = 100n;
-const LIKELY_GAS_PER_REFERENCE_BATCH = 3_250_000n;
-const GAS_PRICE_GWEI = "3";
+const WORKER_COUNT = 5;
+const WALLET_PER_TX = 1;
+const GAS_LIMIT_PER_TX = 65_000n;
+const GAS_PRICE_GWEI = "0.05";
 
-function estimateLikelyGasForWallets(totalWallets: number, batchSize: number): {
+function estimateLikelyGasForWallets(totalWallets: number): {
   estimatedGasLikely: bigint;
-  estimatedMaxGasPerBatchLikely: bigint;
+  estimatedMaxGasPerTxLikely: bigint;
 } {
-  if (totalWallets <= 0 || batchSize <= 0) {
-    return { estimatedGasLikely: 0n, estimatedMaxGasPerBatchLikely: 0n };
+  if (totalWallets <= 0) {
+    return { estimatedGasLikely: 0n, estimatedMaxGasPerTxLikely: 0n };
   }
-
-  let remaining = totalWallets;
-  let estimatedGasLikely = 0n;
-  let estimatedMaxGasPerBatchLikely = 0n;
-
-  while (remaining > 0) {
-    const walletsInBatch = BigInt(Math.min(batchSize, remaining));
-    const likelyGasForBatch =
-      (LIKELY_GAS_PER_REFERENCE_BATCH * walletsInBatch + (REFERENCE_BATCH_SIZE - 1n)) /
-      REFERENCE_BATCH_SIZE;
-    estimatedGasLikely += likelyGasForBatch;
-    if (likelyGasForBatch > estimatedMaxGasPerBatchLikely) {
-      estimatedMaxGasPerBatchLikely = likelyGasForBatch;
-    }
-    remaining -= Number(walletsInBatch);
-  }
-
-  return { estimatedGasLikely, estimatedMaxGasPerBatchLikely };
+  return {
+    estimatedGasLikely: BigInt(totalWallets) * GAS_LIMIT_PER_TX,
+    estimatedMaxGasPerTxLikely: GAS_LIMIT_PER_TX,
+  };
 }
 
 function resolveRpcUrl(network: "bscMainnet" | "bscTestnet"): string {
@@ -163,15 +148,12 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
     const requiredMinTokens = totalWallets * 1;
     const requiredAvgTokens = Math.round(totalWallets * 50.5);
     const requiredMaxTokens = totalWallets * 100;
-    const multiBatchSize = resolveMultiBatchSizeFromEnv();
-    const batchCount = countBatchesForWalletCount(totalWallets, multiBatchSize);
+    const batchSize = WALLET_PER_TX;
+    const batchCount = totalWallets; // one wallet = one transaction
 
     const gasPriceWei = ethers.parseUnits(GAS_PRICE_GWEI, "gwei");
-    const { estimatedGasLikely, estimatedMaxGasPerBatchLikely } = estimateLikelyGasForWallets(
-      totalWallets,
-      multiBatchSize
-    );
-    const estimatedGasMax = GAS_LIMIT_PER_BATCH * BigInt(batchCount);
+    const { estimatedGasLikely, estimatedMaxGasPerTxLikely } = estimateLikelyGasForWallets(totalWallets);
+    const estimatedGasMax = GAS_LIMIT_PER_TX * BigInt(batchCount);
     const estimatedBnbLikelyWei = estimatedGasLikely * gasPriceWei;
     const estimatedBnbMaxWei = estimatedGasMax * gasPriceWei;
 
@@ -186,8 +168,9 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
       network: targetNetwork,
       nativeSymbol: targetNetwork === "bscTestnet" ? "tBNB" : "BNB",
       totalWallets,
-      batchSize: multiBatchSize,
+      batchSize,
       batchCount,
+      workerCount: WORKER_COUNT,
       token: {
         address: session.tokenAddress,
         symbol: String(symbolRaw),
@@ -204,9 +187,9 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
         gasPriceGwei: GAS_PRICE_GWEI,
         estimatedGasLikely: estimatedGasLikely.toString(),
         estimatedGasMax: estimatedGasMax.toString(),
-        estimatedLikelyGasPerLargestBatch: estimatedMaxGasPerBatchLikely.toString(),
-        perBatchGasLimit: GAS_LIMIT_PER_BATCH.toString(),
-        mayExceedPerBatchLimit: estimatedMaxGasPerBatchLikely > GAS_LIMIT_PER_BATCH,
+        estimatedLikelyGasPerLargestBatch: estimatedMaxGasPerTxLikely.toString(),
+        perBatchGasLimit: GAS_LIMIT_PER_TX.toString(),
+        mayExceedPerBatchLimit: false,
         estimatedBnbLikely: ethers.formatEther(estimatedBnbLikelyWei),
         estimatedBnbMax: ethers.formatEther(estimatedBnbMaxWei),
       },

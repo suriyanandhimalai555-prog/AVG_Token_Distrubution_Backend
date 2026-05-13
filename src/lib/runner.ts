@@ -104,6 +104,9 @@ const GROUP_PROGRESS_RE =
 const DISTRIBUTION_COMPLETE_RE = /DISTRIBUTION COMPLETE/;
 
 const BNB_SPENT_RE = /BNB spent:\s+([\d.]+) BNB/;
+const TX_CONFIRMED_RE =
+  /TX CONFIRMED \| Worker (\d+) \| Wallet #(\d+) \| TX: (0x[a-fA-F0-9]+) \| Amount: ([\d.]+)/;
+const PROGRESS_RE = /PROGRESS \| sent=(\d+) \| failed=(\d+) \| total=(\d+)/;
 
 // ─── Generate wallets ─────────────────────────────────────────────────────────
 
@@ -199,6 +202,8 @@ export function runPrepare(
 
     const batchMatch = /Batches needed:\s+([\d,]+)/.exec(text);
     if (batchMatch) batchCount = parseInt(batchMatch[1].replace(/,/g, ""), 10);
+    const txMatch = /On-chain txs \(est\.\):\s+([\d,]+)/.exec(text);
+    if (txMatch) batchCount = parseInt(txMatch[1].replace(/,/g, ""), 10);
   });
 
   proc.stderr.on("data", (chunk: Buffer) => {
@@ -271,6 +276,33 @@ export function runDistribute(
         const failedCount = parseInt(groupMatch[2].replace(/,/g, ""), 10);
         onProgress(sentCount, failedCount);
         emitSseEvent(sessionId, "stats", { sentCount, failedCount });
+      }
+
+      const progressMatch = PROGRESS_RE.exec(line);
+      if (progressMatch) {
+        const sentCount = parseInt(progressMatch[1], 10);
+        const failedCount = parseInt(progressMatch[2], 10);
+        const totalCount = parseInt(progressMatch[3], 10);
+        onProgress(sentCount, failedCount);
+        emitSseEvent(sessionId, "stats", { sentCount, failedCount, totalCount });
+      }
+
+      const txMatch = TX_CONFIRMED_RE.exec(line);
+      if (txMatch) {
+        const workerId = parseInt(txMatch[1], 10);
+        const walletIndex = parseInt(txMatch[2], 10);
+        const txHash = txMatch[3];
+        const amount = txMatch[4];
+        onBatch(walletIndex + 1, 0, 1, txHash, "65000");
+        emitSseEvent(sessionId, "batch", {
+          workerId,
+          walletIndex,
+          walletCount: 1,
+          txHash,
+          amount,
+          status: "confirmed",
+          timestamp: new Date().toISOString(),
+        });
       }
 
       const bnbMatch = BNB_SPENT_RE.exec(line);

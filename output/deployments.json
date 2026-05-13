@@ -1,8 +1,8 @@
 {
   "multisender": {
-    "address": "0x45A75329932d357a5836F478B1DFE3Ed12E0d46b",
+    "address": "0x70Ce01c8cDf898f674848Fb52E9e6BE5FBbd104F",
     "network": "bnb",
     "chainId": "56",
-    "deployedAt": "2026-05-08T09:03:27.585Z"
+    "deployedAt": "2026-05-09T08:46:01.048Z"
   }
 }
