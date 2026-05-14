@@ -173,7 +173,11 @@ router.patch("/:id", async (req: Request, res: Response) => {
       (patch.tokenAddress !== undefined && patch.tokenAddress !== existing.tokenAddress) ||
       (patch.multisenderAddress !== undefined && patch.multisenderAddress !== existing.multisenderAddress);
 
-    if (setupChanged) {
+    /** Same setup fields but session already finished (or stopped/errored) — must wipe run data or UI keeps old wallets/progress. */
+    const terminalRun = existing.status === "done" || existing.status === "stopped" || existing.status === "error";
+    const shouldResetRunData = setupChanged || terminalRun;
+
+    if (shouldResetRunData) {
       await Promise.all([
         Wallet.deleteMany({ sessionId: req.params.id }),
         Batch.deleteMany({ sessionId: req.params.id }),
@@ -195,13 +199,16 @@ router.patch("/:id", async (req: Request, res: Response) => {
     await recordSessionAudit({
       userId: req.user!._id,
       sessionId: req.params.id,
-      action: setupChanged ? "SESSION_SETUP_UPDATED" : "SESSION_UPDATED",
-      message: setupChanged
-        ? "Setup fields changed; run data reset"
+      action: shouldResetRunData ? "SESSION_SETUP_UPDATED" : "SESSION_UPDATED",
+      message: shouldResetRunData
+        ? setupChanged
+          ? "Setup fields changed; run data reset"
+          : "New run after completed/stopped/error; run data reset"
         : "Session metadata updated",
       details: {
         updatedFields: Object.keys(req.body ?? {}),
         setupChanged,
+        terminalRun,
       },
     });
 
