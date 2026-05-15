@@ -3,7 +3,11 @@ import { ethers } from "ethers";
 import { Session } from "../models/Session";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
-import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../lib/distributionBatching";
+import {
+  countBatchesForWalletCount,
+  resolveMultiBatchSizeForWalletCount,
+  resolveParallelWorkerCountForWalletCount,
+} from "../lib/distributionBatching";
 
 const router = Router();
 
@@ -12,10 +16,6 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
 ];
-
-function resolveParallelWorkerCount(): number {
-  return Math.max(1, Math.min(10, Number(process.env.PARALLEL_BATCHES ?? 1)));
-}
 
 /** Matches scripts/distribute.ts multisend tx gasLimit cap. */
 const GAS_LIMIT_MULTISEND = 4_000_000n;
@@ -139,7 +139,7 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
     const requiredMinTokens = totalWallets * 1;
     const requiredAvgTokens = Math.round(totalWallets * 50.5);
     const requiredMaxTokens = totalWallets * 100;
-    const batchSize = resolveMultiBatchSizeFromEnv();
+    const batchSize = resolveMultiBatchSizeForWalletCount(totalWallets);
     const batchCount = countBatchesForWalletCount(totalWallets, batchSize);
 
     const gasPriceWei = ethers.parseUnits(GAS_PRICE_GWEI, "gwei");
@@ -162,7 +162,7 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
       totalWallets,
       batchSize,
       batchCount,
-      workerCount: resolveParallelWorkerCount(),
+      workerCount: resolveParallelWorkerCountForWalletCount(totalWallets),
       token: {
         address: session.tokenAddress,
         symbol: String(symbolRaw),

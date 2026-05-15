@@ -1,7 +1,10 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ethers } from "ethers";
-import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../src/lib/distributionBatching";
+import {
+  countBatchesForWalletCount,
+  resolveMultiBatchSizeForWalletCount,
+} from "../src/lib/distributionBatching";
 
 const OUTPUT_DIR = path.resolve(__dirname, "../output");
 const WALLETS_CSV = path.join(OUTPUT_DIR, "wallets.csv");
@@ -92,7 +95,7 @@ async function prepareDistribution(): Promise<void> {
   console.log(`Expected minimum:       ${minPossible.toLocaleString()} (${AMOUNT_MIN} × ${wallets.length.toLocaleString()})`);
   console.log(`Expected maximum:       ${maxPossible.toLocaleString()} (${AMOUNT_MAX} × ${wallets.length.toLocaleString()})`);
   console.log(`Total wei:              ${(totalTokens * BigInt(10 ** 18)).toString()}`);
-  const batchSize = resolveMultiBatchSizeFromEnv();
+  const batchSize = resolveMultiBatchSizeForWalletCount(wallets.length);
   const estBatches = countBatchesForWalletCount(wallets.length, batchSize);
   console.log(
     `On-chain txs (est.):   ${estBatches.toLocaleString()} MultiSender batches (${batchSize} wallets per batch)`

@@ -1,13 +1,44 @@
 /**
  * MultiSender / prepare path: max wallets per single `multisend` transaction.
- * BATCH_SIZE env only affects this batching — not `PARALLEL_BATCHES` (worker_threads distribute.ts).
- * Default 100; capped by contract max.
+ * Batch size and parallel worker count are server policy (code), not env — tune
+ * `resolveMultiBatchSizeForWalletCount` / `resolveParallelWorkerCountForWalletCount`
+ * when you add a dynamic algorithm (e.g. from wallet count).
  */
 export const MULTISENDER_MAX_PER_TX = 350;
 
-export function resolveMultiBatchSizeFromEnv(): number {
-  const raw = Number(process.env.BATCH_SIZE ?? 100);
-  return Math.min(MULTISENDER_MAX_PER_TX, Math.max(1, Math.floor(Number.isFinite(raw) ? raw : 100)));
+/** Default wallets per multisend tx (clamped to MULTISENDER_MAX_PER_TX). */
+export const DEFAULT_MULTI_BATCH_SIZE = 100;
+
+export const PARALLEL_WORKERS_MIN = 1;
+export const PARALLEL_WORKERS_MAX = 10;
+/** Default parallel multisend txs in scripts/distribute.ts (clamped 1–10). */
+export const DEFAULT_PARALLEL_WORKERS = 5;
+
+function clampMultiBatchSize(n: number): number {
+  return Math.min(MULTISENDER_MAX_PER_TX, Math.max(1, Math.floor(n)));
+}
+
+function clampParallelWorkers(n: number): number {
+  if (!Number.isFinite(n)) return DEFAULT_PARALLEL_WORKERS;
+  return Math.max(PARALLEL_WORKERS_MIN, Math.min(PARALLEL_WORKERS_MAX, Math.floor(n)));
+}
+
+/**
+ * Wallets per MultiSender tx for a distribution of this size.
+ * Today: fixed default; later: derive from totalWallets (and optional signals).
+ */
+export function resolveMultiBatchSizeForWalletCount(_totalWallets: number): number {
+  void _totalWallets;
+  return clampMultiBatchSize(DEFAULT_MULTI_BATCH_SIZE);
+}
+
+/**
+ * Parallel multisend worker count for a distribution of this size.
+ * Today: fixed default; later: derive from totalWallets.
+ */
+export function resolveParallelWorkerCountForWalletCount(_totalWallets: number): number {
+  void _totalWallets;
+  return clampParallelWorkers(DEFAULT_PARALLEL_WORKERS);
 }
 
 export function countBatchesForWalletCount(walletCount: number, multiBatchSize: number): number {

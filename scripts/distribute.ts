@@ -12,7 +12,8 @@ import {
 import {
   chunkFixedBatches,
   countBatchesForWalletCount,
-  resolveMultiBatchSizeFromEnv,
+  resolveMultiBatchSizeForWalletCount,
+  resolveParallelWorkerCountForWalletCount,
 } from "../src/lib/distributionBatching";
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
@@ -25,11 +26,6 @@ const ARTIFACTS_DIR = path.resolve(__dirname, "../artifacts/contracts");
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const BATCH_SIZE = resolveMultiBatchSizeFromEnv();
-const PARALLEL_BATCHES = Math.max(
-  1,
-  Math.min(10, Number(process.env.PARALLEL_BATCHES ?? 1))
-);
 const MAX_RETRIES = 3;
 const RETRY_DELAYS_MS = [5_000, 10_000, 15_000];
 const MAX_DRAIN_PASSES = 5;
@@ -384,14 +380,16 @@ async function main(): Promise<void> {
   const multisender = new Contract(multisenderAddress, multisenderAbi, deployer);
 
   const plan = loadPlan();
+  const batchSize = resolveMultiBatchSizeForWalletCount(plan.length);
+  const parallelWorkers = resolveParallelWorkerCountForWalletCount(plan.length);
   const totalStart = plan.filter((e) => !e.sent).length;
 
   log(`Total wallets in plan: ${plan.length.toLocaleString()}`);
   log(`Already sent:          ${(plan.length - totalStart).toLocaleString()}`);
   log(`Remaining:             ${totalStart.toLocaleString()}`);
-  const totalBatchCount = countBatchesForWalletCount(totalStart, BATCH_SIZE);
-  log(`Batch size:            ${BATCH_SIZE} wallets per multisend tx`);
-  log(`Parallel batches:      ${PARALLEL_BATCHES}`);
+  const totalBatchCount = countBatchesForWalletCount(totalStart, batchSize);
+  log(`Batch size:            ${batchSize} wallets per multisend tx`);
+  log(`Parallel batches:      ${parallelWorkers}`);
   log(`Gas price:             0.05 Gwei`);
   log(`Gas limit:             ${GAS_LIMIT.toLocaleString()} per batch tx`);
   log(`Est. batch txs:        ${totalBatchCount}`);
@@ -449,7 +447,7 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
-  const totalBatches = countBatchesForWalletCount(totalStart, BATCH_SIZE);
+  const totalBatches = countBatchesForWalletCount(totalStart, batchSize);
 
   for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
     const unsent = plan.filter((e) => !e.sent);
@@ -459,13 +457,13 @@ async function main(): Promise<void> {
     log(`Pass ${pass}/${MAX_DRAIN_PASSES} — ${unsent.length.toLocaleString()} wallets remaining`);
     log(`${"─".repeat(60)}`);
 
-    const batches = chunkFixedBatches(unsent, BATCH_SIZE);
-    const parallelGroups = chunkArray(batches, PARALLEL_BATCHES);
+    const batches = chunkFixedBatches(unsent, batchSize);
+    const parallelGroups = chunkArray(batches, parallelWorkers);
 
     const submitter = new SerialTxSubmitter(deployer, rpcManager);
 
     const sentWalletCount = plan.length - unsent.length;
-    let batchOrdinal = countBatchesForWalletCount(sentWalletCount, BATCH_SIZE);
+    let batchOrdinal = countBatchesForWalletCount(sentWalletCount, batchSize);
     let passSuccess = 0;
     let passFail = 0;
 
