@@ -1,6 +1,7 @@
 /**
- * Fixed-size on-chain multisend batches (must stay in sync with scripts/distribute.ts).
- * Default 100 wallets per tx; override with BATCH_SIZE env (capped by contract max).
+ * MultiSender / prepare path: max wallets per single `multisend` transaction.
+ * BATCH_SIZE env only affects this batching — not `PARALLEL_BATCHES` (worker_threads distribute.ts).
+ * Default 100; capped by contract max.
  */
 export const MULTISENDER_MAX_PER_TX = 350;
 

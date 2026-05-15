@@ -3,6 +3,7 @@ import { ethers } from "ethers";
 import { Session } from "../models/Session";
 import { requireAuth } from "../middleware/requireAuth";
 import { requirePlan } from "../middleware/requirePlan";
+import { countBatchesForWalletCount, resolveMultiBatchSizeFromEnv } from "../lib/distributionBatching";
 
 const router = Router();
 
@@ -12,23 +13,13 @@ const ERC20_ABI = [
   "function symbol() view returns (string)",
 ];
 
-const WORKER_COUNT = 5;
-const WALLET_PER_TX = 1;
-const GAS_LIMIT_PER_TX = 65_000n;
-const GAS_PRICE_GWEI = "0.05";
-
-function estimateLikelyGasForWallets(totalWallets: number): {
-  estimatedGasLikely: bigint;
-  estimatedMaxGasPerTxLikely: bigint;
-} {
-  if (totalWallets <= 0) {
-    return { estimatedGasLikely: 0n, estimatedMaxGasPerTxLikely: 0n };
-  }
-  return {
-    estimatedGasLikely: BigInt(totalWallets) * GAS_LIMIT_PER_TX,
-    estimatedMaxGasPerTxLikely: GAS_LIMIT_PER_TX,
-  };
+function resolveParallelWorkerCount(): number {
+  return Math.max(1, Math.min(10, Number(process.env.PARALLEL_BATCHES ?? 1)));
 }
+
+/** Matches scripts/distribute.ts multisend tx gasLimit cap. */
+const GAS_LIMIT_MULTISEND = 4_000_000n;
+const GAS_PRICE_GWEI = "0.05";
 
 function resolveRpcUrl(network: "bscMainnet" | "bscTestnet"): string {
   if (network === "bscTestnet") {
@@ -148,12 +139,13 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
     const requiredMinTokens = totalWallets * 1;
     const requiredAvgTokens = Math.round(totalWallets * 50.5);
     const requiredMaxTokens = totalWallets * 100;
-    const batchSize = WALLET_PER_TX;
-    const batchCount = totalWallets; // one wallet = one transaction
+    const batchSize = resolveMultiBatchSizeFromEnv();
+    const batchCount = countBatchesForWalletCount(totalWallets, batchSize);
 
     const gasPriceWei = ethers.parseUnits(GAS_PRICE_GWEI, "gwei");
-    const { estimatedGasLikely, estimatedMaxGasPerTxLikely } = estimateLikelyGasForWallets(totalWallets);
-    const estimatedGasMax = GAS_LIMIT_PER_TX * BigInt(batchCount);
+    const estimatedMaxGasPerTxLikely = GAS_LIMIT_MULTISEND;
+    const estimatedGasLikely = GAS_LIMIT_MULTISEND * BigInt(batchCount);
+    const estimatedGasMax = estimatedGasLikely;
     const estimatedBnbLikelyWei = estimatedGasLikely * gasPriceWei;
     const estimatedBnbMaxWei = estimatedGasMax * gasPriceWei;
 
@@ -170,7 +162,7 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
       totalWallets,
       batchSize,
       batchCount,
-      workerCount: WORKER_COUNT,
+      workerCount: resolveParallelWorkerCount(),
       token: {
         address: session.tokenAddress,
         symbol: String(symbolRaw),
@@ -188,7 +180,7 @@ router.post("/preflight", requireAuth, requirePlan, async (req: Request, res: Re
         estimatedGasLikely: estimatedGasLikely.toString(),
         estimatedGasMax: estimatedGasMax.toString(),
         estimatedLikelyGasPerLargestBatch: estimatedMaxGasPerTxLikely.toString(),
-        perBatchGasLimit: GAS_LIMIT_PER_TX.toString(),
+        perBatchGasLimit: GAS_LIMIT_MULTISEND.toString(),
         mayExceedPerBatchLimit: false,
         estimatedBnbLikely: ethers.formatEther(estimatedBnbLikelyWei),
         estimatedBnbMax: ethers.formatEther(estimatedBnbMaxWei),
