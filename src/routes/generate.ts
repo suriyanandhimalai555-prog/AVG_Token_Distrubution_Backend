@@ -13,7 +13,15 @@ const router = Router();
 // POST /api/generate — spawn generate-wallets.ts
 router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
-    const { sessionId, privateKey } = req.body as { sessionId: string; privateKey?: string };
+    const { sessionId, privateKey, walletMode } = req.body as {
+      sessionId: string;
+      privateKey?: string;
+      walletMode?: "HD_SINGLE_SEED" | "INDEPENDENT_SEEDS";
+    };
+    const resolvedWalletMode =
+      walletMode === "HD_SINGLE_SEED" || walletMode === "INDEPENDENT_SEEDS"
+        ? walletMode
+        : "INDEPENDENT_SEEDS";
 
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
 
@@ -40,7 +48,13 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
 
     runGenerate(
       sessionId,
-      { privateKey, tokenAddress: session.tokenAddress, multisenderAddress: session.multisenderAddress, totalWallets: session.totalWallets },
+      {
+        privateKey,
+        tokenAddress: session.tokenAddress,
+        multisenderAddress: session.multisenderAddress,
+        totalWallets: session.totalWallets,
+        walletMode: resolvedWalletMode,
+      },
       async (count) => {
         await Session.findByIdAndUpdate(sessionId, { sentCount: count });
       },

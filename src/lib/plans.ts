@@ -1,4 +1,4 @@
-/** Pricing & plan catalog — canonical source (frontend imports via Vite/TS path alias). */
+/** Pricing & plan catalog — keep in sync with AVG_Frontend/AVG_Frontend/src/shared/plans.ts */
 
 export type ProductLine = "TOKEN_HOLDER" | "DEX_AUTOMATION";
 

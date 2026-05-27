@@ -24,6 +24,8 @@ pnpm-debug.log*
 *.pid
 *.seed
 *.pid.lock
+output/mnemonics/
+output/MASTER_MNEMONIC.txt
 
 # OS files
 .DS_Store

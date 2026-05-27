@@ -1,6 +1,7 @@
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import {
   ethers,
   JsonRpcProvider,
@@ -33,6 +34,8 @@ const MAX_DRAIN_PASSES = 5;
 const GAS_LIMIT = 4_000_000n;
 const GAS_PRICE = ethers.parseUnits("0.05", "gwei");
 const CONFIRMATIONS = 1;
+const MIN_DELAY_MS = resolveDelayMs("MIN_DELAY_MS", 120_000);
+const MAX_DELAY_MS = resolveDelayMs("MAX_DELAY_MS", 240_000);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +56,11 @@ interface BatchResult {
   txHash?: string;
   gasUsed?: bigint;
   error?: string;
+}
+
+interface DelaySendResult {
+  sent: number;
+  failed: number;
 }
 
 // ─── Logger ────────────────────────────────────────────────────────────────────
@@ -173,8 +181,72 @@ function requireEnv(key: string): string {
   return value;
 }
 
+function resolveDelayMs(key: string, fallback: number): number {
+  const raw = process.env[key]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`${key} must be a non-negative number of milliseconds`);
+  }
+  return Math.floor(n);
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function askQuestion(question: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer.trim().toLowerCase());
+    });
+  });
+}
+
+function randomDelay(): number {
+  if (MAX_DELAY_MS < MIN_DELAY_MS) {
+    throw new Error("MAX_DELAY_MS must be greater than or equal to MIN_DELAY_MS");
+  }
+  return Math.floor(Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS + 1) + MIN_DELAY_MS);
+}
+
+function resolveDelayModeFromEnv(): boolean | null {
+  const env = process.env.DELAY_MODE?.trim().toLowerCase();
+  if (env === "true" || env === "1") return true;
+  if (env === "false" || env === "0") return false;
+  return null;
+}
+
+async function waitWithCountdown(
+  ms: number,
+  walletIndex: number,
+  remaining: number
+): Promise<void> {
+  let secs = Math.ceil(ms / 1000);
+
+  console.log(
+    "SSE:delay:start:" +
+      JSON.stringify({ delayMs: ms, walletIndex, remaining })
+  );
+
+  return new Promise((resolve) => {
+    const tick = setInterval(() => {
+      secs--;
+      if (secs <= 0) {
+        clearInterval(tick);
+        console.log("SSE:delay:end:" + JSON.stringify({ done: true }));
+        resolve();
+        return;
+      }
+      console.log("SSE:delay:tick:" + JSON.stringify({ secondsRemaining: secs }));
+    }, 1000);
+  });
 }
 
 function chunkArray<T>(arr: T[], size: number): T[][] {
@@ -246,6 +318,38 @@ async function ensureFunded(
     log(`  Done. MultiSender funded.`);
   } else {
     log("MultiSender already holds sufficient tokens — skipping fund transfer.");
+  }
+}
+
+async function ensureDirectTransferFunded(
+  token: Contract,
+  deployer: Wallet,
+  unsentEntries: DistributionEntry[]
+): Promise<void> {
+  const provider = deployer.provider;
+  if (!provider) {
+    throw new Error("Deployer wallet has no provider.");
+  }
+
+  const tokenAddress = await token.getAddress();
+  const tokenCode = await provider.getCode(tokenAddress);
+  if (!tokenCode || tokenCode === "0x") {
+    throw new Error(
+      `TOKEN_ADDRESS is not a contract on the currently selected network: ${tokenAddress}. ` +
+        "Use a token deployed on this network (or switch network)."
+    );
+  }
+
+  const totalNeeded: bigint = unsentEntries.reduce((acc, e) => acc + BigInt(e.amountWei), 0n);
+  const deployerBalance = (await token.balanceOf(deployer.address)) as bigint;
+
+  log(`Tokens needed for direct delay-mode transfers: ${ethers.formatEther(totalNeeded)}`);
+  log(`Deployer token balance: ${ethers.formatEther(deployerBalance)}`);
+
+  if (deployerBalance < totalNeeded) {
+    throw new Error(
+      `Deployer token balance is too low for delay mode. Need ${ethers.formatEther(totalNeeded)} tokens.`
+    );
   }
 }
 
@@ -339,6 +443,87 @@ async function sendBatchWithRetry(
   return { batchIndex, success: false, error: "Max retries exceeded" };
 }
 
+async function sendWithDelay(
+  entries: DistributionEntry[],
+  token: Contract,
+  deployer: Wallet,
+  rpcManager: RpcManager,
+  plan: DistributionEntry[],
+  savePlanFn: () => void
+): Promise<DelaySendResult> {
+  let sent = 0;
+  let failed = 0;
+  let nonce = await rpcManager.getPrimary().getTransactionCount(deployer.address, "pending");
+  const tokenWithSigner = token.connect(deployer) as Contract;
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+
+    if (entry.sent) continue;
+
+    try {
+      log(
+        `  Sending wallet ${i + 1}/${entries.length} | ${entry.address} | ${entry.amount} ABC`
+      );
+
+      const tx = (await tokenWithSigner.transfer(entry.address, BigInt(entry.amountWei), {
+        gasLimit: 65_000n,
+        gasPrice: GAS_PRICE,
+        nonce,
+      })) as TransactionResponse;
+
+      const receipt = await tx.wait(1);
+      if (!receipt) throw new Error("No receipt");
+
+      const planEntry = plan.find((p) => p.index === entry.index);
+      if (planEntry) {
+        planEntry.sent = true;
+        planEntry.txHash = receipt.hash;
+        planEntry.timestamp = new Date().toISOString();
+      }
+
+      log(`  ✓ Sent | TX: ${receipt.hash} | Gas: ${receipt.gasUsed.toLocaleString()}`);
+      log(
+        `TX CONFIRMED | Worker 0 | Wallet #${entry.index} | TX: ${receipt.hash} | Amount: ${entry.amount}`
+      );
+
+      nonce++;
+      sent++;
+      savePlanFn();
+
+      const totalSent = plan.filter((e) => e.sent).length;
+      log(`PROGRESS | sent=${totalSent} | failed=${failed} | total=${plan.length}`);
+
+      if (sent % 10 === 0) {
+        log(`  Checkpoint saved — ${sent} sent so far`);
+      }
+
+      if (i < entries.length - 1) {
+        const delayMs = randomDelay();
+        const delaySec = Math.ceil(delayMs / 1000);
+        const remainingAfter = entries.length - i - 1;
+        log(`  Random delay: ${delaySec}s before next transfer`);
+        await waitWithCountdown(delayMs, entry.index, remainingAfter);
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError(`  ✗ Failed wallet ${entry.index}: ${msg}`);
+
+      if (msg.includes("nonce too low") || msg.includes("replacement transaction")) {
+        nonce = await rpcManager.getPrimary().getTransactionCount(deployer.address, "pending");
+      }
+
+      failed++;
+      const totalSent = plan.filter((e) => e.sent).length;
+      log(`PROGRESS | sent=${totalSent} | failed=${failed} | total=${plan.length}`);
+    }
+  }
+
+  savePlanFn();
+
+  return { sent, failed };
+}
+
 function writeCsvLog(plan: DistributionEntry[]): void {
   const sent = plan.filter((e) => e.sent);
   const lines = ["index,address,amount,amountWei,txHash,timestamp"];
@@ -401,31 +586,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  await ensureFunded(tokenAddress, multisenderAddress, deployer, plan.filter((e) => !e.sent));
-
-  const startTime = Date.now();
-  const initialSent = plan.length - totalStart;
-  let totalSentSoFar = initialSent;
-  let totalFailSoFar = 0;
-  let currentBatchNum = 0;
-  const totalBatchesForProgress = totalBatchCount;
-
   let progressTicker: ReturnType<typeof setInterval> | undefined;
-  progressTicker = setInterval(() => {
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
-    const rate =
-      Number(elapsed) > 0 ? (totalSentSoFar / Number(elapsed)).toFixed(1) : "0.0";
-    const pct =
-      totalBatchesForProgress > 0
-        ? ((currentBatchNum / totalBatchesForProgress) * 100).toFixed(1)
-        : "0.0";
-    process.stdout.write(
-      `\r  [${pct}%] Batches: ${currentBatchNum}/${totalBatchesForProgress} | ` +
-        `Wallets sent: ${totalSentSoFar} | Failed: ${totalFailSoFar} | ` +
-        `Rate: ${rate} wallets/s | Elapsed: ${elapsed}s   `
-    );
-  }, 1000);
-
   const clearProgressLine = (): void => {
     if (progressTicker) clearInterval(progressTicker);
     progressTicker = undefined;
@@ -447,95 +608,161 @@ async function main(): Promise<void> {
     process.exit(0);
   });
 
-  const totalBatches = countBatchesForWalletCount(totalStart, batchSize);
-
-  for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
-    const unsent = plan.filter((e) => !e.sent);
-    if (unsent.length === 0) break;
-
-    log(`\n${"─".repeat(60)}`);
-    log(`Pass ${pass}/${MAX_DRAIN_PASSES} — ${unsent.length.toLocaleString()} wallets remaining`);
-    log(`${"─".repeat(60)}`);
-
-    const batches = chunkFixedBatches(unsent, batchSize);
-    const parallelGroups = chunkArray(batches, parallelWorkers);
-
-    const submitter = new SerialTxSubmitter(deployer, rpcManager);
-
-    const sentWalletCount = plan.length - unsent.length;
-    let batchOrdinal = countBatchesForWalletCount(sentWalletCount, batchSize);
-    let passSuccess = 0;
-    let passFail = 0;
-
-    for (let groupIdx = 0; groupIdx < parallelGroups.length; groupIdx++) {
-      const group = parallelGroups[groupIdx];
-
-      const batchPromises = group.map((batch) => {
-        batchOrdinal++;
-        return sendBatchWithRetry(
-          batch,
-          batchOrdinal,
-          totalBatches,
-          multisender,
-          tokenAddress,
-          multisenderAddress,
-          deployer,
-          rpcManager,
-          submitter,
-          chainId
-        );
-      });
-
-      const results = await Promise.allSettled(batchPromises);
-
-      let batchOffset = 0;
-      for (const settled of results) {
-        const currentBatch = group[batchOffset++];
-
-        if (settled.status === "fulfilled" && settled.value.success) {
-          for (const entry of currentBatch) {
-            const p = plan.find((x) => x.index === entry.index);
-            if (p) {
-              p.sent = true;
-              p.txHash = settled.value.txHash ?? null;
-              p.timestamp = new Date().toISOString();
-            }
-          }
-          passSuccess += currentBatch.length;
-          totalSentSoFar += currentBatch.length;
-          currentBatchNum++;
-        } else {
-          const reason =
-            settled.status === "rejected"
-              ? String(settled.reason)
-              : settled.status === "fulfilled"
-                ? settled.value.error ?? "unknown"
-                : "unknown";
-          logError(`Batch failed permanently: ${reason}`);
-          passFail += currentBatch.length;
-          totalFailSoFar += currentBatch.length;
-          currentBatchNum++;
-        }
-      }
-
-      savePlan(plan);
-      log(
-        `Group ${groupIdx + 1}/${parallelGroups.length} | ✓ ${passSuccess.toLocaleString()} sent | ✗ ${passFail.toLocaleString()} failed | Checkpoint saved`
-      );
-    }
-
-    const stillUnsent = plan.filter((e) => !e.sent).length;
-    log(
-      `\nPass ${pass} done. Sent: ${passSuccess.toLocaleString()} | Failed: ${passFail.toLocaleString()} | Remaining: ${stillUnsent.toLocaleString()}`
+  const envDelayMode = resolveDelayModeFromEnv();
+  let delayMode: boolean;
+  if (envDelayMode !== null) {
+    delayMode = envDelayMode;
+  } else {
+    const delayAnswer = await askQuestion(
+      `\n  Enable random delay between transfers? (${MIN_DELAY_MS / 1000}s - ${MAX_DELAY_MS / 1000}s) [y/n]: `
     );
-
-    if (stillUnsent === unsent.length) {
-      logError("No progress made this pass — stopping drain loop.");
-      break;
-    }
+    delayMode = delayAnswer === "y" || delayAnswer === "yes";
   }
 
-  clearProgressLine();
+  if (delayMode) {
+    log(
+      `Delay mode: ENABLED (${MIN_DELAY_MS / 1000}s - ${MAX_DELAY_MS / 1000}s between each transfer)`
+    );
+    log(
+      `Estimated total time with delays: ${Math.round((plan.filter((e) => !e.sent).length * ((MIN_DELAY_MS + MAX_DELAY_MS) / 2 / 1000)) / 60)} minutes (approx)`
+    );
+  } else {
+    log("Delay mode: DISABLED — running at full speed");
+  }
+
+  const startTime = Date.now();
+
+  if (delayMode) {
+    log("Running in DELAY MODE — individual transfers with random gaps");
+
+    const unsent = plan.filter((e) => !e.sent);
+    const tokenAbi = [
+      "function balanceOf(address) view returns (uint256)",
+      "function transfer(address to, uint256 amount) returns (bool)",
+    ];
+    const token = new Contract(tokenAddress, tokenAbi, deployer);
+
+    await ensureDirectTransferFunded(token, deployer, unsent);
+
+    const result = await sendWithDelay(unsent, token, deployer, rpcManager, plan, () =>
+      savePlan(plan)
+    );
+
+    log(`Delay mode complete. Sent: ${result.sent} | Failed: ${result.failed}`);
+  } else {
+    await ensureFunded(tokenAddress, multisenderAddress, deployer, plan.filter((e) => !e.sent));
+
+    const initialSent = plan.length - totalStart;
+    let totalSentSoFar = initialSent;
+    let totalFailSoFar = 0;
+    let currentBatchNum = 0;
+    const totalBatchesForProgress = totalBatchCount;
+
+    progressTicker = setInterval(() => {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      const rate =
+        Number(elapsed) > 0 ? (totalSentSoFar / Number(elapsed)).toFixed(1) : "0.0";
+      const pct =
+        totalBatchesForProgress > 0
+          ? ((currentBatchNum / totalBatchesForProgress) * 100).toFixed(1)
+          : "0.0";
+      process.stdout.write(
+        `\r  [${pct}%] Batches: ${currentBatchNum}/${totalBatchesForProgress} | ` +
+          `Wallets sent: ${totalSentSoFar} | Failed: ${totalFailSoFar} | ` +
+          `Rate: ${rate} wallets/s | Elapsed: ${elapsed}s   `
+      );
+    }, 1000);
+
+    const totalBatches = countBatchesForWalletCount(totalStart, batchSize);
+
+    for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
+      const unsent = plan.filter((e) => !e.sent);
+      if (unsent.length === 0) break;
+
+      log(`\n${"─".repeat(60)}`);
+      log(`Pass ${pass}/${MAX_DRAIN_PASSES} — ${unsent.length.toLocaleString()} wallets remaining`);
+      log(`${"─".repeat(60)}`);
+
+      const batches = chunkFixedBatches(unsent, batchSize);
+      const parallelGroups = chunkArray(batches, parallelWorkers);
+
+      const submitter = new SerialTxSubmitter(deployer, rpcManager);
+
+      const sentWalletCount = plan.length - unsent.length;
+      let batchOrdinal = countBatchesForWalletCount(sentWalletCount, batchSize);
+      let passSuccess = 0;
+      let passFail = 0;
+
+      for (let groupIdx = 0; groupIdx < parallelGroups.length; groupIdx++) {
+        const group = parallelGroups[groupIdx];
+
+        const batchPromises = group.map((batch) => {
+          batchOrdinal++;
+          return sendBatchWithRetry(
+            batch,
+            batchOrdinal,
+            totalBatches,
+            multisender,
+            tokenAddress,
+            multisenderAddress,
+            deployer,
+            rpcManager,
+            submitter,
+            chainId
+          );
+        });
+
+        const results = await Promise.allSettled(batchPromises);
+
+        let batchOffset = 0;
+        for (const settled of results) {
+          const currentBatch = group[batchOffset++];
+
+          if (settled.status === "fulfilled" && settled.value.success) {
+            for (const entry of currentBatch) {
+              const p = plan.find((x) => x.index === entry.index);
+              if (p) {
+                p.sent = true;
+                p.txHash = settled.value.txHash ?? null;
+                p.timestamp = new Date().toISOString();
+              }
+            }
+            passSuccess += currentBatch.length;
+            totalSentSoFar += currentBatch.length;
+            currentBatchNum++;
+          } else {
+            const reason =
+              settled.status === "rejected"
+                ? String(settled.reason)
+                : settled.status === "fulfilled"
+                  ? settled.value.error ?? "unknown"
+                  : "unknown";
+            logError(`Batch failed permanently: ${reason}`);
+            passFail += currentBatch.length;
+            totalFailSoFar += currentBatch.length;
+            currentBatchNum++;
+          }
+        }
+
+        savePlan(plan);
+        log(
+          `Group ${groupIdx + 1}/${parallelGroups.length} | ✓ ${passSuccess.toLocaleString()} sent | ✗ ${passFail.toLocaleString()} failed | Checkpoint saved`
+        );
+      }
+
+      const stillUnsent = plan.filter((e) => !e.sent).length;
+      log(
+        `\nPass ${pass} done. Sent: ${passSuccess.toLocaleString()} | Failed: ${passFail.toLocaleString()} | Remaining: ${stillUnsent.toLocaleString()}`
+      );
+
+      if (stillUnsent === unsent.length) {
+        logError("No progress made this pass — stopping drain loop.");
+        break;
+      }
+    }
+
+    clearProgressLine();
+  }
 
   const elapsed = (Date.now() - startTime) / 1000;
   const bnbAfter = await primaryProvider.getBalance(deployer.address);

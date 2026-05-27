@@ -33,6 +33,18 @@ function resolveTotalWallets(): number {
 const TOTAL_WALLETS = resolveTotalWallets();
 const BIP44_BASE_PATH = "m/44'/60'/0'/0";
 
+type GenerationMode = "HD_SINGLE_SEED" | "INDEPENDENT_SEEDS";
+
+function resolveGenerationMode(): GenerationMode {
+  const mode = (process.env.WALLET_MODE as GenerationMode | undefined) ?? "INDEPENDENT_SEEDS";
+  if (mode !== "HD_SINGLE_SEED" && mode !== "INDEPENDENT_SEEDS") {
+    throw new Error("WALLET_MODE must be INDEPENDENT_SEEDS or HD_SINGLE_SEED");
+  }
+  return mode;
+}
+
+const GENERATION_MODE: GenerationMode = resolveGenerationMode();
+
 // Use all physical cores (capped at 8 — diminishing returns beyond that)
 const NUM_WORKERS = Math.min(os.cpus().length, 8);
 
@@ -77,7 +89,27 @@ function formatDuration(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
-async function generateWallets(): Promise<void> {
+function log(message: string): void {
+  console.log(message);
+}
+
+function csvEscape(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`;
+}
+
+function endCsvStream(csvStream: fs.WriteStream): Promise<void> {
+  return new Promise((resolve, reject) => {
+    csvStream.on("finish", resolve);
+    csvStream.on("error", reject);
+    csvStream.end();
+  });
+}
+
+async function generateHdWallets(
+  totalWallets: number,
+  outputPath: string,
+  mnemonicPath: string
+): Promise<void> {
   ensureOutputDir();
 
   console.log("Generating random mnemonic...");
@@ -85,24 +117,24 @@ async function generateWallets(): Promise<void> {
   const mnemonic = randomWallet.mnemonic?.phrase;
   if (!mnemonic) throw new Error("Failed to generate mnemonic");
 
-  fs.writeFileSync(MNEMONIC_FILE, mnemonic, "utf8");
-  console.log(`Master mnemonic saved → ${MNEMONIC_FILE}`);
-  console.log(`KEEP THIS FILE SECURE — it controls all ${TOTAL_WALLETS.toLocaleString()} wallets.\n`);
+  fs.writeFileSync(mnemonicPath, mnemonic, "utf8");
+  console.log(`Master mnemonic saved → ${mnemonicPath}`);
+  console.log(`KEEP THIS FILE SECURE — it controls all ${totalWallets.toLocaleString()} wallets.\n`);
 
   console.log(`Spawning ${NUM_WORKERS} worker threads across ${os.cpus().length} CPU cores...`);
-  console.log(`Total wallets: ${TOTAL_WALLETS.toLocaleString()}\n`);
+  console.log(`Total wallets: ${totalWallets.toLocaleString()}\n`);
 
   const startTime = Date.now();
 
   // ── Split work evenly across workers ────────────────────────────────────────
-  const chunkSize = Math.ceil(TOTAL_WALLETS / NUM_WORKERS);
+  const chunkSize = Math.ceil(totalWallets / NUM_WORKERS);
   const workerPromises: Promise<string[]>[] = [];
 
   for (let w = 0; w < NUM_WORKERS; w++) {
     const startIndex = w * chunkSize;
-    const endIndex   = Math.min(startIndex + chunkSize, TOTAL_WALLETS);
+    const endIndex   = Math.min(startIndex + chunkSize, totalWallets);
 
-    if (startIndex >= TOTAL_WALLETS) break;
+    if (startIndex >= totalWallets) break;
 
     const promise = new Promise<string[]>((resolve, reject) => {
       const worker = new Worker(__filename, {
@@ -142,13 +174,13 @@ async function generateWallets(): Promise<void> {
   const walletCount = csvLines.length - 1; // subtract header
   console.log(`\nAll workers done. Verifying count: ${walletCount.toLocaleString()} wallets`);
 
-  if (walletCount !== TOTAL_WALLETS) {
-    throw new Error(`Expected ${TOTAL_WALLETS} wallets but got ${walletCount}`);
+  if (walletCount !== totalWallets) {
+    throw new Error(`Expected ${totalWallets} wallets but got ${walletCount}`);
   }
 
   // ── Write CSV ────────────────────────────────────────────────────────────────
   console.log("Writing wallets.csv...");
-  fs.writeFileSync(WALLETS_CSV, csvLines.join("\n"), "utf8");
+  fs.writeFileSync(outputPath, csvLines.join("\n"), "utf8");
 
   const elapsed = (Date.now() - startTime) / 1000;
 
@@ -156,16 +188,98 @@ async function generateWallets(): Promise<void> {
   console.log("WALLET GENERATION COMPLETE");
   console.log(`${"═".repeat(55)}`);
   console.log(`Workers used:    ${NUM_WORKERS} (of ${os.cpus().length} CPU cores)`);
-  console.log(`Total wallets:   ${TOTAL_WALLETS.toLocaleString()}`);
+  console.log(`Total wallets:   ${totalWallets.toLocaleString()}`);
   console.log(`Time taken:      ${formatDuration(elapsed)}`);
-  console.log(`Throughput:      ${Math.round(TOTAL_WALLETS / elapsed).toLocaleString()} wallets/s`);
-  console.log(`Output:          ${WALLETS_CSV}`);
-  console.log(`Master mnemonic: ${MNEMONIC_FILE}`);
+  console.log(`Throughput:      ${Math.round(totalWallets / elapsed).toLocaleString()} wallets/s`);
+  console.log(`Output:          ${outputPath}`);
+  console.log(`Master mnemonic: ${mnemonicPath}`);
   console.log(`${"═".repeat(55)}`);
   console.log("\nNext step: run  npm run prepare:distribution");
 }
 
-generateWallets().catch((err: unknown) => {
+async function generateIndependentWallets(
+  totalWallets: number,
+  outputPath: string,
+  mnemonicDir: string
+): Promise<void> {
+  ensureOutputDir();
+
+  log(`Generating ${totalWallets.toLocaleString()} wallets — INDEPENDENT mode`);
+  log("Each wallet has its own unique seed phrase");
+  log("This may take longer than HD mode...");
+  log(`Estimated time: ${formatDuration((totalWallets * 2) / 1000)} (~2ms per wallet)`);
+
+  if (totalWallets > 10_000) {
+    log(
+      `WARNING: independent mode will create ${totalWallets.toLocaleString()} individual mnemonic files.`
+    );
+  }
+
+  // Each generated wallet gets a standalone seed backup file.
+  const mnemonicFolder = path.join(mnemonicDir, "mnemonics");
+  if (!fs.existsSync(mnemonicFolder)) {
+    fs.mkdirSync(mnemonicFolder, { recursive: true });
+  }
+
+  const startTime = Date.now();
+  const csvStream = fs.createWriteStream(outputPath);
+  csvStream.write("index,address,privateKey,mnemonic,derivationPath\n");
+
+  const LOG_EVERY = 1000;
+
+  for (let i = 0; i < totalWallets; i++) {
+    const randomWallet = ethers.Wallet.createRandom();
+    const entry = {
+      index: i,
+      address: randomWallet.address,
+      privateKey: randomWallet.privateKey,
+      mnemonic: randomWallet.mnemonic?.phrase ?? "",
+      derivationPath: "independent",
+    };
+
+    csvStream.write(
+      `${entry.index},${entry.address},${entry.privateKey},` +
+        `${csvEscape(entry.mnemonic)},${entry.derivationPath}\n`
+    );
+
+    fs.writeFileSync(
+      path.join(mnemonicFolder, `wallet-${i}.txt`),
+      [
+        `Wallet Index: ${i}`,
+        `Address:      ${entry.address}`,
+        `Mnemonic:     ${entry.mnemonic}`,
+        `Generated:    ${new Date().toISOString()}`,
+        "",
+        "KEEP THIS SAFE. Never share your seed phrase.",
+      ].join("\n"),
+      "utf8"
+    );
+
+    if ((i + 1) % LOG_EVERY === 0 || i === totalWallets - 1) {
+      log(
+        `Generated ${(i + 1).toLocaleString()} / ${totalWallets.toLocaleString()} wallets`
+      );
+    }
+  }
+
+  await endCsvStream(csvStream);
+
+  const elapsed = (Date.now() - startTime) / 1000;
+  log(`Wallets saved to: ${outputPath}`);
+  log(`Mnemonics saved to: ${mnemonicFolder}`);
+  log(`Total wallets generated: ${totalWallets.toLocaleString()}`);
+  log(`Time taken: ${formatDuration(elapsed)}`);
+}
+
+async function main(): Promise<void> {
+  if (GENERATION_MODE === "INDEPENDENT_SEEDS") {
+    await generateIndependentWallets(TOTAL_WALLETS, WALLETS_CSV, OUTPUT_DIR);
+  } else {
+    await generateHdWallets(TOTAL_WALLETS, WALLETS_CSV, MNEMONIC_FILE);
+  }
+}
+
+main().catch((err: unknown) => {
   console.error("generate-wallets failed:", err);
   process.exit(1);
 });

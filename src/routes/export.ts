@@ -27,6 +27,79 @@ function csvEscape(value: string): string {
   return value;
 }
 
+/** Parse one CSV line with RFC-style double-quoted fields (handles commas inside quotes). */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuote = false;
+  let i = 0;
+  while (i < line.length) {
+    const c = line[i]!;
+    if (inQuote) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i += 2;
+          continue;
+        }
+        inQuote = false;
+        i++;
+        continue;
+      }
+      cur += c;
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      inQuote = true;
+      i++;
+      continue;
+    }
+    if (c === ",") {
+      out.push(cur);
+      cur = "";
+      i++;
+      continue;
+    }
+    cur += c;
+    i++;
+  }
+  out.push(cur);
+  return out;
+}
+
+/**
+ * When wallets.csv includes a `mnemonic` column (INDEPENDENT_SEEDS), map wallet index → seed phrase.
+ * HD mode CSV has no mnemonic column — returns empty map (caller uses session master mnemonic).
+ */
+function loadMnemonicByWalletIndex(scriptsDir: string): Map<number, string> {
+  const map = new Map<number, string>();
+  const csvPath = path.join(scriptsDir, "output", "wallets.csv");
+  if (!fs.existsSync(csvPath)) return map;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(csvPath, "utf8");
+  } catch {
+    return map;
+  }
+  const lines = raw.trim().split(/\r?\n/);
+  if (lines.length < 2) return map;
+  const header = parseCsvLine(lines[0]!);
+  const indexCol = header.findIndex((h) => h.trim().toLowerCase() === "index");
+  const mnemonicCol = header.findIndex((h) => h.trim().toLowerCase() === "mnemonic");
+  if (indexCol < 0 || mnemonicCol < 0) return map;
+
+  for (let li = 1; li < lines.length; li++) {
+    const parts = parseCsvLine(lines[li]!);
+    if (parts.length <= Math.max(indexCol, mnemonicCol)) continue;
+    const idx = parseInt(parts[indexCol]!.trim(), 10);
+    if (!Number.isFinite(idx)) continue;
+    const phrase = parts[mnemonicCol]!.trim();
+    if (phrase) map.set(idx, phrase);
+  }
+  return map;
+}
+
 async function resolveTokenName(tokenAddress: string): Promise<string> {
   let tokenName = "TOKEN";
   try {
@@ -165,8 +238,12 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
       }
     }
 
-    const mnemonic = session.masterMnemonic ?? "";
+    const masterMnemonic = session.masterMnemonic ?? "";
+    const mnemonicByIndex = loadMnemonicByWalletIndex(scriptsDir);
     const networkLabel = networkDisplayName(session.network);
+
+    const seedForWallet = (walletIndex: number): string =>
+      mnemonicByIndex.get(walletIndex) ?? masterMnemonic;
 
     if (file === "csv") {
       res.setHeader("Content-Disposition", "attachment; filename=distribution-log.csv");
@@ -200,7 +277,7 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
         lines.push(
           [
             csvEscape(w.address),
-            csvEscape(mnemonic),
+            csvEscape(seedForWallet(w.index)),
             csvEscape(networkLabel),
             csvEscape(nativeByAddr.get(w.address) ?? "0.0"),
             csvEscape(tokenNameResolved),
@@ -242,7 +319,7 @@ router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) =>
               );
         sheet.addRow({
           walletAddress: w.address,
-          mnemonic,
+          mnemonic: seedForWallet(w.index),
           network: networkLabel,
           nativeBalance: nativeByAddr.get(w.address) ?? "0.0",
           tokenName: tokenNameResolved,

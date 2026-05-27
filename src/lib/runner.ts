@@ -64,6 +64,8 @@ export function isRunning(sessionId: string): boolean {
   return activeProcesses.has(sessionId);
 }
 
+type WalletMode = "HD_SINGLE_SEED" | "INDEPENDENT_SEEDS";
+
 interface ScriptEnvOptions {
   privateKey?: string;
   tokenAddress?: string;
@@ -72,6 +74,8 @@ interface ScriptEnvOptions {
   rpcUrl?: string;
   fallbackRpc1?: string;
   fallbackRpc2?: string;
+  walletMode?: WalletMode;
+  delayMode?: boolean;
 }
 
 /**
@@ -90,7 +94,25 @@ function buildChildEnv(opts: ScriptEnvOptions): NodeJS.ProcessEnv {
   if (opts.rpcUrl)             extra.ALCHEMY_RPC_URL      = opts.rpcUrl;
   if (opts.fallbackRpc1)       extra.FALLBACK_RPC_1       = opts.fallbackRpc1;
   if (opts.fallbackRpc2)       extra.FALLBACK_RPC_2       = opts.fallbackRpc2;
+  if (opts.walletMode)         extra.WALLET_MODE          = opts.walletMode;
+  if (opts.delayMode !== undefined) extra.DELAY_MODE      = opts.delayMode ? "true" : "false";
   return { ...process.env, ...extra };
+}
+
+function forwardSseStdoutLine(sessionId: string, line: string): boolean {
+  if (!line.startsWith("SSE:")) return false;
+  const rest = line.slice(4);
+  const jsonStart = rest.indexOf("{");
+  if (jsonStart <= 0) return false;
+  const eventPath = rest.slice(0, jsonStart - 1);
+  const jsonPart = rest.slice(jsonStart);
+  try {
+    const data = JSON.parse(jsonPart) as unknown;
+    emitSseEvent(sessionId, eventPath, data);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Regex patterns to parse distribute.ts stdout ─────────────────────────────
@@ -250,6 +272,10 @@ export function runDistribute(
 
     for (const line of lines) {
       console.log(`[distribute:${sessionId}]`, line.trim());
+
+      if (forwardSseStdoutLine(sessionId, line.trim())) {
+        continue;
+      }
 
       const batchMatch = BATCH_CONFIRMED_RE.exec(line);
       if (batchMatch) {

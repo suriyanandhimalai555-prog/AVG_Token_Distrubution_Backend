@@ -73,7 +73,11 @@ async function syncWalletStatusFromPlan(
 // POST /api/distribute — spawn distribute.ts
 router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
   try {
-    const { sessionId, privateKey } = req.body as { sessionId: string; privateKey: string };
+    const { sessionId, privateKey, delayMode } = req.body as {
+      sessionId: string;
+      privateKey: string;
+      delayMode?: boolean;
+    };
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
     if (!privateKey) return res.status(400).json({ error: "privateKey is required" });
 
@@ -125,6 +129,7 @@ router.post("/", requireAuth, requirePlan, async (req: Request, res: Response) =
           session.network === "bscTestnet"
             ? (process.env.BSC_TESTNET_FALLBACK_RPC_2 || "https://data-seed-prebsc-2-s1.binance.org:8545")
             : process.env.FALLBACK_RPC_2,
+        delayMode: delayMode === true,
       },
       async (batchIndex, _totalBatches, walletCount, txHash, gasUsed) => {
         await Batch.findOneAndUpdate(
