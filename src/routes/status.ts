@@ -1,18 +1,21 @@
 import { Router, Request, Response } from "express";
+import mongoose from "mongoose";
 import { Session } from "../models/Session";
 import { Batch } from "../models/Batch";
 import { Wallet } from "../models/Wallet";
 import { isRunning } from "../lib/runner";
 import { requireAuth } from "../middleware/requireAuth";
-import { requirePlan } from "../middleware/requirePlan";
 
 const router = Router();
 
-// GET /api/status?sessionId=xxx — live session status
-router.get("/", requireAuth, requirePlan, async (req: Request, res: Response) => {
+// GET /api/status?sessionId=xxx — live session status (read-only; auth only)
+router.get("/", requireAuth, async (req: Request, res: Response) => {
   try {
-    const { sessionId } = req.query as { sessionId: string };
+    const sessionId = String(req.query.sessionId ?? "").trim();
     if (!sessionId) return res.status(400).json({ error: "sessionId is required" });
+    if (!mongoose.Types.ObjectId.isValid(sessionId)) {
+      return res.status(404).json({ error: "Session not found" });
+    }
 
     const session = await Session.findById(sessionId).lean();
     if (!session) return res.status(404).json({ error: "Session not found" });
