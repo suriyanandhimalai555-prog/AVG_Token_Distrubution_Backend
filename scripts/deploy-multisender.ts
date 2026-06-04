@@ -1,5 +1,5 @@
 import hre from "hardhat";
-import { ethers } from "ethers";
+import { ethers, type InterfaceAbi } from "ethers";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   console.log("Network:", networkName);
 
   const artifact = JSON.parse(fs.readFileSync(ARTIFACT_PATH, "utf8")) as {
-    abi: unknown[];
+    abi: InterfaceAbi;
     bytecode: string;
   };
 

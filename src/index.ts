@@ -35,10 +35,26 @@ const allowedOrigins = [
   process.env.CLIENT_URL ?? "",
 ].filter(Boolean);
 
+function hostMatchesAllowed(requestOrigin: string): boolean {
+  try {
+    const req = new URL(requestOrigin);
+    const reqBase = req.hostname.replace(/^www\./i, "");
+    for (const allowed of allowedOrigins) {
+      const a = new URL(allowed);
+      if (a.hostname.replace(/^www\./i, "") === reqBase) return true;
+    }
+  } catch {
+    /* ignore malformed origin */
+  }
+  return false;
+}
+
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      if (!origin || allowedOrigins.includes(origin) || hostMatchesAllowed(origin)) {
+        return cb(null, true);
+      }
       return cb(new Error(`CORS: origin ${origin} not allowed`));
     },
     credentials: true,
