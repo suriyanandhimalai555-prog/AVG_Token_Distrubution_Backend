@@ -1,34 +1,46 @@
-name: Deploy Backend
+name: Backend Deploy
 
 on:
   push:
     branches:
       - main
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
+
   deploy:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - uses: actions/checkout@v4
 
-      - name: Deploy Backend
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ secrets.GHCR_USERNAME }}
+          password: ${{ secrets.GHCR_TOKEN }}
+
+      - name: Build Backend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:latest
+
+      - name: Deploy VPS
+        uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
-          port: 22
+          port: ${{ secrets.PORT }}
           script: |
-            hostname
-            whoami
-
-            cd /root/otp/apps/AVG_TOKEN_DISTRIBUTION/AVG_Token_Distrubution_Backend
-
-            git fetch origin
-            git reset --hard origin/main
-
-            cd ..
-
-            docker compose build holderforge-backend
-            docker compose up -d holderforge-backend
+            cd ${{ vars.APP_PATH }}
+            docker compose pull backend
+            docker compose up -d backend
