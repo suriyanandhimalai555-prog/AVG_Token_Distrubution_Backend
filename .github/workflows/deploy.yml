@@ -28,7 +28,8 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - uses: docker/build-push-action@v6
+      - name: Build and Push Backend
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
@@ -36,7 +37,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - uses: appleboy/ssh-action@v1.2.2
+      - name: Deploy Backend
+        uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USERNAME }}
@@ -45,12 +47,15 @@ jobs:
           timeout: 60s
           command_timeout: 20m
           script: |
+            set -e
+
             cd ${{ vars.APP_PATH }}
 
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
             docker compose pull backend
-
             docker compose up -d backend
 
             docker image prune -af
+
+            docker ps
