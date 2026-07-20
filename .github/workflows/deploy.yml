@@ -18,17 +18,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Build and Push Backend
+      - name: Build and Push Backend Image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -46,16 +49,31 @@ jobs:
           port: ${{ secrets.PORT }}
           timeout: 60s
           command_timeout: 20m
+          debug: true
           script: |
             set -e
 
+            echo "========== SERVER =========="
+            hostname
+            whoami
+            pwd
+
+            echo "========== APPLICATION =========="
             cd ${{ vars.APP_PATH }}
 
+            echo "========== LOGIN TO GHCR =========="
             echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
-            docker compose pull backend
-            docker compose up -d backend
+            echo "========== PULL LATEST BACKEND IMAGE =========="
+            docker compose pull holderforge-backend
 
+            echo "========== RESTART BACKEND CONTAINER =========="
+            docker compose up -d holderforge-backend
+
+            echo "========== REMOVE UNUSED IMAGES =========="
             docker image prune -af
 
+            echo "========== RUNNING CONTAINERS =========="
             docker ps
+
+            echo "========== BACKEND DEPLOYMENT SUCCESSFUL =========="
