@@ -1,4 +1,4 @@
-name: Backend Deploy
+name: AVG_TOKEN Backend Deploy
 
 on:
   push:
@@ -10,8 +10,15 @@ permissions:
   packages: write
 
 concurrency:
-  group: backend-deploy
-  cancel-in-progress: true
+  group: avgtoken-backend-deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}
+  NAMESPACE: avgtoken
+  DEPLOYMENT: avgtoken-backend
+  CONTAINER: backend
 
 jobs:
   deploy:
@@ -20,6 +27,9 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -31,16 +41,18 @@ jobs:
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
-      - name: Build and Push Backend Image
+      - name: Build and Push ARM64 Backend Image
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/arm64
           push: true
-          tags: ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:latest
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Deploy Backend
+      - name: Deploy to Kubernetes
         uses: appleboy/ssh-action@v1.2.2
         with:
           host: ${{ secrets.HOST }}
@@ -51,30 +63,66 @@ jobs:
           command_timeout: 20m
           debug: true
           script: |
-            set -e
+            set -Eeuo pipefail
 
             echo "========== SERVER =========="
             hostname
             whoami
-            pwd
+
+            echo "========== KUBERNETES =========="
+            kubectl version --client
+            kubectl get nodes -o wide
 
             echo "========== APPLICATION =========="
-            cd ${{ vars.APP_PATH }}
+            kubectl -n avgtoken get deployment avgtoken-backend
 
-            echo "========== LOGIN TO GHCR =========="
-            echo "${{ secrets.GHCR_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+            echo "========== DEPLOY IMAGE =========="
+            IMAGE="ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}"
+            echo "Deploying: ${IMAGE}"
 
-            echo "========== PULL LATEST BACKEND IMAGE =========="
-            docker compose pull holderforge-backend
+            echo "========== CURRENT IMAGE =========="
+            kubectl -n avgtoken get deployment avgtoken-backend \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}'
+            echo
 
-            echo "========== RESTART BACKEND CONTAINER =========="
-            docker compose up -d holderforge-backend
+            echo "========== SET NEW IMAGE =========="
+            kubectl -n avgtoken set image \
+              deployment/${{ env.DEPLOYMENT }} \
+              ${{ env.CONTAINER }}="${IMAGE}"
 
-            echo "========== REMOVE UNUSED IMAGES =========="
-            docker image prune -af
+            echo "========== WAIT FOR ROLLOUT =========="
+            if ! kubectl -n avgtoken rollout status \
+              deployment/${{ env.DEPLOYMENT }} \
+              --timeout=10m; then
 
-            echo "========== RUNNING CONTAINERS =========="
-            docker ps
+              echo "========== ROLLOUT FAILED =========="
+              kubectl -n avgtoken get pods -o wide
+              kubectl -n avgtoken describe deployment/${{ env.DEPLOYMENT }}
+              kubectl -n avgtoken get events \
+                --sort-by='.lastTimestamp' | tail -80
+
+              echo "========== ROLLING BACK =========="
+              kubectl -n avgtoken rollout undo \
+                deployment/${{ env.DEPLOYMENT }}
+
+              echo "========== WAIT FOR ROLLBACK =========="
+              kubectl -n avgtoken rollout status \
+                deployment/${{ env.DEPLOYMENT }} \
+                --timeout=10m
+
+              echo "========== ROLLBACK COMPLETE =========="
+              kubectl -n avgtoken get deployment,pod -o wide
+
+              exit 1
+            fi
+
+            echo "========== ROLLOUT SUCCESS =========="
+            kubectl -n avgtoken get deployment,pod -o wide
+
+            echo "========== VERIFY DEPLOYED IMAGE =========="
+            kubectl -n avgtoken get deployment avgtoken-backend \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}'
+            echo
 
             echo "========== BACKEND DEPLOYMENT SUCCESSFUL =========="
 
@@ -82,16 +130,16 @@ jobs:
         if: success()
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
+          server_address: smtp.hostinger.com
+          server_port: 587
+          secure: false
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ Backend Deployment Successful"
+          subject: "✅ AVG_TOKEN Backend Deployment Successful"
           to: "Sanjayvanan03@gmail.com,muthukdm45@gmail.com,deepakavgprimetech@gmail.com"
           from: ${{ secrets.SMTP_USERNAME }}
           html_body: |
-            <h2>✅ Backend Deployment Successful</h2>
+            <h2>✅ AVG_TOKEN Backend Deployment Successful</h2>
 
             <table border="1" cellpadding="8" cellspacing="0">
               <tr>
@@ -105,6 +153,10 @@ jobs:
               <tr>
                 <td><b>Commit</b></td>
                 <td>${{ github.sha }}</td>
+              </tr>
+              <tr>
+                <td><b>Image</b></td>
+                <td>ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</td>
               </tr>
               <tr>
                 <td><b>Triggered By</b></td>
@@ -126,16 +178,16 @@ jobs:
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
+          server_address: smtp.hostinger.com
+          server_port: 587
+          secure: false
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ Backend Deployment Failed"
+          subject: "❌ AVG_TOKEN Backend Deployment Failed"
           to: "Sanjayvanan03@gmail.com,muthukdm45@gmail.com,deepakavgprimetech@gmail.com"
           from: ${{ secrets.SMTP_USERNAME }}
           html_body: |
-            <h2>❌ Backend Deployment Failed</h2>
+            <h2>❌ AVG_TOKEN Backend Deployment Failed</h2>
 
             <table border="1" cellpadding="8" cellspacing="0">
               <tr>
@@ -149,6 +201,10 @@ jobs:
               <tr>
                 <td><b>Commit</b></td>
                 <td>${{ github.sha }}</td>
+              </tr>
+              <tr>
+                <td><b>Image</b></td>
+                <td>ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</td>
               </tr>
               <tr>
                 <td><b>Triggered By</b></td>
