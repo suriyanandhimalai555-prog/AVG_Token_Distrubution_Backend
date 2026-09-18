@@ -10,14 +10,14 @@ permissions:
   packages: write
 
 concurrency:
-  group: avgtoken-backend-deploy
+  group: avg-token-backend-deploy
   cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}
-  NAMESPACE: avgtoken
-  DEPLOYMENT: avgtoken-backend
+  NAMESPACE: avg-token-distribution
+  DEPLOYMENT: avg-token-backend
   CONTAINER: backend
 
 jobs:
@@ -28,6 +28,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Backend
+        run: npm run build
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -37,7 +49,7 @@ jobs:
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ secrets.GHCR_USERNAME }}
           password: ${{ secrets.GHCR_TOKEN }}
 
@@ -65,6 +77,11 @@ jobs:
           script: |
             set -Eeuo pipefail
 
+            NAMESPACE="avg-token-distribution"
+            DEPLOYMENT="avg-token-backend"
+            CONTAINER="backend"
+            IMAGE="ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}"
+
             echo "========== SERVER =========="
             hostname
             whoami
@@ -73,56 +90,322 @@ jobs:
             kubectl version --client
             kubectl get nodes -o wide
 
-            echo "========== APPLICATION =========="
-            kubectl -n avgtoken get deployment avgtoken-backend
+            echo "========== VERIFY NAMESPACE =========="
+            kubectl get namespace "${NAMESPACE}"
 
-            echo "========== DEPLOY IMAGE =========="
-            IMAGE="ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}"
-            echo "Deploying: ${IMAGE}"
+            echo "========== ENSURE GHCR PULL SECRET =========="
 
-            echo "========== CURRENT IMAGE =========="
-            kubectl -n avgtoken get deployment avgtoken-backend \
-              -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}'
-            echo
+            kubectl -n "${NAMESPACE}" create secret docker-registry ghcr-credentials \
+              --docker-server=ghcr.io \
+              --docker-username="${{ secrets.GHCR_USERNAME }}" \
+              --docker-password="${{ secrets.GHCR_TOKEN }}" \
+              --dry-run=client -o yaml \
+              | kubectl apply -f -
 
-            echo "========== SET NEW IMAGE =========="
-            kubectl -n avgtoken set image \
-              deployment/${{ env.DEPLOYMENT }} \
-              ${{ env.CONTAINER }}="${IMAGE}"
+            echo "========== APPLICATION STATUS =========="
 
-            echo "========== WAIT FOR ROLLOUT =========="
-            if ! kubectl -n avgtoken rollout status \
-              deployment/${{ env.DEPLOYMENT }} \
+            kubectl -n "${NAMESPACE}" get deployment "${DEPLOYMENT}" || true
+            kubectl -n "${NAMESPACE}" get service avg-token-backend || true
+
+            echo "========== TARGET IMAGE =========="
+
+            echo "Deploying image:"
+            echo "${IMAGE}"
+
+            if kubectl -n "${NAMESPACE}" get deployment "${DEPLOYMENT}" >/dev/null 2>&1; then
+
+              echo "========== EXISTING DEPLOYMENT =========="
+
+              CURRENT_IMAGE="$(kubectl -n "${NAMESPACE}" get deployment "${DEPLOYMENT}" \
+                -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}')"
+
+              echo "Current image:"
+              echo "${CURRENT_IMAGE}"
+
+              echo "========== SET NEW IMAGE =========="
+
+              kubectl -n "${NAMESPACE}" set image \
+                deployment/"${DEPLOYMENT}" \
+                "${CONTAINER}"="${IMAGE}"
+
+              echo "========== WAIT FOR ROLLOUT =========="
+
+              if ! kubectl -n "${NAMESPACE}" rollout status \
+                deployment/"${DEPLOYMENT}" \
+                --timeout=10m; then
+
+                echo "========== ROLLOUT FAILED =========="
+
+                kubectl -n "${NAMESPACE}" get deployment,pod -o wide || true
+
+                kubectl -n "${NAMESPACE}" describe deployment/"${DEPLOYMENT}" || true
+
+                echo "========== RECENT EVENTS =========="
+
+                kubectl -n "${NAMESPACE}" get events \
+                  --sort-by='.lastTimestamp' | tail -80 || true
+
+                echo "========== POD LOGS =========="
+
+                kubectl -n "${NAMESPACE}" logs \
+                  deployment/"${DEPLOYMENT}" \
+                  --all-containers=true \
+                  --tail=200 || true
+
+                echo "========== CHECKING ROLLBACK AVAILABILITY =========="
+
+                REVISION_COUNT="$(kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT}" \
+                  --no-headers 2>/dev/null | wc -l || true)"
+
+                if [ "${REVISION_COUNT}" -gt 1 ]; then
+
+                  echo "========== ROLLING BACK =========="
+
+                  kubectl -n "${NAMESPACE}" rollout undo \
+                    deployment/"${DEPLOYMENT}"
+
+                  echo "========== WAIT FOR ROLLBACK =========="
+
+                  kubectl -n "${NAMESPACE}" rollout status \
+                    deployment/"${DEPLOYMENT}" \
+                    --timeout=10m
+
+                  echo "========== ROLLBACK COMPLETE =========="
+
+                  kubectl -n "${NAMESPACE}" get deployment,pod -o wide
+
+                else
+
+                  echo "No previous revision exists."
+                  echo "Nothing to roll back."
+
+                fi
+
+                exit 1
+              fi
+
+            else
+
+              echo "========== FIRST DEPLOYMENT =========="
+
+              kubectl -n "${NAMESPACE}" apply -f - <<EOF_MANIFEST
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: avg-token-backend
+              namespace: avg-token-distribution
+            spec:
+              replicas: 1
+              strategy:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxUnavailable: 0
+                  maxSurge: 1
+              minReadySeconds: 10
+              progressDeadlineSeconds: 600
+              selector:
+                matchLabels:
+                  app: avg-token-backend
+              template:
+                metadata:
+                  labels:
+                    app: avg-token-backend
+                spec:
+                  imagePullSecrets:
+                    - name: ghcr-credentials
+                  containers:
+                    - name: backend
+                      image: ${IMAGE}
+                      imagePullPolicy: IfNotPresent
+                      ports:
+                        - name: http
+                          containerPort: 4002
+                          protocol: TCP
+                      envFrom:
+                        - secretRef:
+                            name: avg-token-backend-env
+                      startupProbe:
+                        httpGet:
+                          path: /health
+                          port: http
+                        periodSeconds: 5
+                        timeoutSeconds: 2
+                        failureThreshold: 30
+                      readinessProbe:
+                        httpGet:
+                          path: /health
+                          port: http
+                        periodSeconds: 5
+                        timeoutSeconds: 2
+                        failureThreshold: 3
+                      livenessProbe:
+                        httpGet:
+                          path: /health
+                          port: http
+                        periodSeconds: 10
+                        timeoutSeconds: 2
+                        failureThreshold: 3
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 128Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+            EOF_MANIFEST
+
+            fi
+
+            echo "========== ENSURE BACKEND SERVICE =========="
+
+            kubectl -n "${NAMESPACE}" apply -f - <<'EOF_SERVICE'
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: avg-token-backend
+              namespace: avg-token-distribution
+            spec:
+              type: ClusterIP
+              selector:
+                app: avg-token-backend
+              ports:
+                - name: http
+                  port: 4002
+                  targetPort: http
+                  protocol: TCP
+            EOF_SERVICE
+
+            echo "========== FINAL ROLLOUT CHECK =========="
+
+            if ! kubectl -n "${NAMESPACE}" rollout status \
+              deployment/"${DEPLOYMENT}" \
               --timeout=10m; then
 
-              echo "========== ROLLOUT FAILED =========="
-              kubectl -n avgtoken get pods -o wide
-              kubectl -n avgtoken describe deployment/${{ env.DEPLOYMENT }}
-              kubectl -n avgtoken get events \
-                --sort-by='.lastTimestamp' | tail -80
+              echo "========== FINAL ROLLOUT FAILED =========="
 
-              echo "========== ROLLING BACK =========="
-              kubectl -n avgtoken rollout undo \
-                deployment/${{ env.DEPLOYMENT }}
+              kubectl -n "${NAMESPACE}" get deployment,pod -o wide || true
 
-              echo "========== WAIT FOR ROLLBACK =========="
-              kubectl -n avgtoken rollout status \
-                deployment/${{ env.DEPLOYMENT }} \
-                --timeout=10m
+              kubectl -n "${NAMESPACE}" describe deployment/"${DEPLOYMENT}" || true
 
-              echo "========== ROLLBACK COMPLETE =========="
-              kubectl -n avgtoken get deployment,pod -o wide
+              kubectl -n "${NAMESPACE}" get events \
+                --sort-by='.lastTimestamp' | tail -80 || true
+
+              kubectl -n "${NAMESPACE}" logs \
+                deployment/"${DEPLOYMENT}" \
+                --all-containers=true \
+                --tail=200 || true
+
+              REVISION_COUNT="$(kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT}" \
+                --no-headers 2>/dev/null | wc -l || true)"
+
+              if [ "${REVISION_COUNT}" -gt 1 ]; then
+
+                echo "========== ROLLING BACK FAILED DEPLOYMENT =========="
+
+                kubectl -n "${NAMESPACE}" rollout undo \
+                  deployment/"${DEPLOYMENT}"
+
+                kubectl -n "${NAMESPACE}" rollout status \
+                  deployment/"${DEPLOYMENT}" \
+                  --timeout=10m
+
+                echo "Rollback completed."
+
+              else
+
+                echo "No previous revision exists."
+                echo "Nothing to roll back."
+
+              fi
 
               exit 1
             fi
 
             echo "========== ROLLOUT SUCCESS =========="
-            kubectl -n avgtoken get deployment,pod -o wide
+
+            kubectl -n "${NAMESPACE}" get deployment,pod -o wide
 
             echo "========== VERIFY DEPLOYED IMAGE =========="
-            kubectl -n avgtoken get deployment avgtoken-backend \
-              -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}'
-            echo
+
+            DEPLOYED_IMAGE="$(kubectl -n "${NAMESPACE}" get deployment "${DEPLOYMENT}" \
+              -o jsonpath='{.spec.template.spec.containers[?(@.name=="backend")].image}')"
+
+            echo "Expected image:"
+            echo "${IMAGE}"
+
+            echo "Deployed image:"
+            echo "${DEPLOYED_IMAGE}"
+
+            test "${DEPLOYED_IMAGE}" = "${IMAGE}"
+
+            echo "========== VERIFY BACKEND SERVICE =========="
+
+            kubectl -n "${NAMESPACE}" get service avg-token-backend
+            kubectl -n "${NAMESPACE}" get endpoints avg-token-backend
+
+            echo "========== VERIFY BACKEND POD READY =========="
+
+            kubectl -n "${NAMESPACE}" get pods \
+              -l app=avg-token-backend \
+              -o wide
+
+            echo "========== INTERNAL HEALTH CHECK =========="
+
+            TEST_POD="avg-token-backend-health-${{ github.run_id }}"
+
+            kubectl -n "${NAMESPACE}" run "${TEST_POD}" \
+              --restart=Never \
+              --image=curlimages/curl:8.10.1 \
+              --command -- \
+              curl -fsS --max-time 10 \
+              http://avg-token-backend:4002/health
+
+            if ! kubectl -n "${NAMESPACE}" wait \
+              --for=jsonpath='{.status.phase}'=Succeeded \
+              pod/"${TEST_POD}" \
+              --timeout=60s; then
+
+              echo "========== INTERNAL HEALTH CHECK FAILED =========="
+
+              kubectl -n "${NAMESPACE}" logs pod/"${TEST_POD}" || true
+
+              kubectl -n "${NAMESPACE}" delete pod/"${TEST_POD}" \
+                --ignore-not-found
+
+              echo "========== ROLLING BACK AFTER HEALTH CHECK FAILURE =========="
+
+              REVISION_COUNT="$(kubectl -n "${NAMESPACE}" rollout history deployment/"${DEPLOYMENT}" \
+                --no-headers 2>/dev/null | wc -l || true)"
+
+              if [ "${REVISION_COUNT}" -gt 1 ]; then
+
+                echo "Previous revision exists. Rolling back."
+
+                kubectl -n "${NAMESPACE}" rollout undo \
+                  deployment/"${DEPLOYMENT}"
+
+                kubectl -n "${NAMESPACE}" rollout status \
+                  deployment/"${DEPLOYMENT}" \
+                  --timeout=10m
+
+                echo "Rollback completed."
+
+              else
+
+                echo "No previous revision exists."
+                echo "Nothing to roll back."
+
+              fi
+
+              exit 1
+            fi
+
+            echo "========== INTERNAL HEALTH CHECK PASSED =========="
+
+            kubectl -n "${NAMESPACE}" logs pod/"${TEST_POD}"
+
+            kubectl -n "${NAMESPACE}" delete pod/"${TEST_POD}" \
+              --ignore-not-found
 
             echo "========== BACKEND DEPLOYMENT SUCCESSFUL =========="
 
@@ -135,44 +418,22 @@ jobs:
           secure: false
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "✅ AVG_TOKEN Backend Deployment Successful"
-          to: "Sanjayvanan03@gmail.com,muthukdm45@gmail.com,deepakavgprimetech@gmail.com"
+          subject: "AVG_TOKEN Backend Deployment Successful"
+          to: "chandrashekhargawda2000@gmail.com,devops@avgprimetech.com"
           from: ${{ secrets.SMTP_USERNAME }}
           html_body: |
-            <h2>✅ AVG_TOKEN Backend Deployment Successful</h2>
-
-            <table border="1" cellpadding="8" cellspacing="0">
-              <tr>
-                <td><b>Repository</b></td>
-                <td>${{ github.repository }}</td>
-              </tr>
-              <tr>
-                <td><b>Branch</b></td>
-                <td>${{ github.ref_name }}</td>
-              </tr>
-              <tr>
-                <td><b>Commit</b></td>
-                <td>${{ github.sha }}</td>
-              </tr>
-              <tr>
-                <td><b>Image</b></td>
-                <td>ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</td>
-              </tr>
-              <tr>
-                <td><b>Triggered By</b></td>
-                <td>${{ github.actor }}</td>
-              </tr>
-              <tr>
-                <td><b>Workflow</b></td>
-                <td>${{ github.workflow }}</td>
-              </tr>
-            </table>
-
-            <br>
-
-            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
-              View GitHub Actions Run
-            </a>
+            <h2>AVG_TOKEN Backend Deployment Successful</h2>
+            <p><b>Repository:</b> ${{ github.repository }}</p>
+            <p><b>Branch:</b> ${{ github.ref_name }}</p>
+            <p><b>Commit:</b> ${{ github.sha }}</p>
+            <p><b>Image:</b> ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</p>
+            <p><b>Triggered By:</b> ${{ github.actor }}</p>
+            <p><b>Workflow:</b> ${{ github.workflow }}</p>
+            <p>
+              <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+                View GitHub Actions Run
+              </a>
+            </p>
 
       - name: Send Failure Email
         if: failure()
@@ -183,41 +444,19 @@ jobs:
           secure: false
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "❌ AVG_TOKEN Backend Deployment Failed"
-          to: "Sanjayvanan03@gmail.com,muthukdm45@gmail.com,deepakavgprimetech@gmail.com"
+          subject: "AVG_TOKEN Backend Deployment Failed"
+          to: "chandrashekhargawda2000@gmail.com,devops@avgprimetech.com"
           from: ${{ secrets.SMTP_USERNAME }}
           html_body: |
-            <h2>❌ AVG_TOKEN Backend Deployment Failed</h2>
-
-            <table border="1" cellpadding="8" cellspacing="0">
-              <tr>
-                <td><b>Repository</b></td>
-                <td>${{ github.repository }}</td>
-              </tr>
-              <tr>
-                <td><b>Branch</b></td>
-                <td>${{ github.ref_name }}</td>
-              </tr>
-              <tr>
-                <td><b>Commit</b></td>
-                <td>${{ github.sha }}</td>
-              </tr>
-              <tr>
-                <td><b>Image</b></td>
-                <td>ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</td>
-              </tr>
-              <tr>
-                <td><b>Triggered By</b></td>
-                <td>${{ github.actor }}</td>
-              </tr>
-              <tr>
-                <td><b>Workflow</b></td>
-                <td>${{ github.workflow }}</td>
-              </tr>
-            </table>
-
-            <br>
-
-            <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
-              View GitHub Actions Run
-            </a>
+            <h2>AVG_TOKEN Backend Deployment Failed</h2>
+            <p><b>Repository:</b> ${{ github.repository }}</p>
+            <p><b>Branch:</b> ${{ github.ref_name }}</p>
+            <p><b>Commit:</b> ${{ github.sha }}</p>
+            <p><b>Image:</b> ghcr.io/${{ secrets.GHCR_USERNAME }}/${{ vars.IMAGE_NAME }}:${{ github.sha }}</p>
+            <p><b>Triggered By:</b> ${{ github.actor }}</p>
+            <p><b>Workflow:</b> ${{ github.workflow }}</p>
+            <p>
+              <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">
+                View GitHub Actions Run
+              </a>
+            </p>
