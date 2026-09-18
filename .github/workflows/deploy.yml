@@ -21,7 +21,9 @@ env:
   CONTAINER: backend
 
 jobs:
-  deploy:
+
+  build-and-push:
+    name: Build and Push Backend Image
     runs-on: ubuntu-latest
 
     steps:
@@ -64,6 +66,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+
+  deploy:
+    name: Deploy Backend to Kubernetes
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Deploy to Kubernetes
         uses: appleboy/ssh-action@v1.2.2
         with:
@@ -409,8 +418,18 @@ jobs:
 
             echo "========== BACKEND DEPLOYMENT SUCCESSFUL =========="
 
+
+  notification:
+    name: Deployment Notification
+    needs:
+      - build-and-push
+      - deploy
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
       - name: Send Success Email
-        if: success()
+        if: needs.build-and-push.result == 'success' && needs.deploy.result == 'success'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.hostinger.com
@@ -436,7 +455,7 @@ jobs:
             </p>
 
       - name: Send Failure Email
-        if: failure()
+        if: needs.build-and-push.result == 'failure' || needs.deploy.result == 'failure'
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.hostinger.com
